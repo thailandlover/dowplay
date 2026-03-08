@@ -42,7 +42,7 @@ android {
     }
 
     defaultConfig {
-        minSdk 24
+        minSdk 26
     }
 }
 def mediaVersion = "1.4.1"
