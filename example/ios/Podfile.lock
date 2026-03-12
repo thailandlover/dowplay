@@ -1,5 +1,5 @@
 PODS:
-  - dowplay (0.0.3):
+  - dowplay (0.0.4):
     - Flutter
   - Flutter (1.0.0)
 
@@ -14,7 +14,7 @@ EXTERNAL SOURCES:
     :path: Flutter
 
 SPEC CHECKSUMS:
-  dowplay: aa69488afbef861fec11c04a8bc14292073d449f
+  dowplay: b533dcd38f788ffd6a93585e7d0b545b83d6b1cd
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
 
 PODFILE CHECKSUM: 57c8aed26fba39d3ec9424816221f294a07c58eb

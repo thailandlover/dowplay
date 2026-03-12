@@ -112,10 +112,20 @@ public class VideoPlayerViewController: UIViewController {
     func setPresentationStyle(_ style : UIModalPresentationStyle){
         self.modalPresentationStyle = style
     }
-    
+
+
+    public override var prefersHomeIndicatorAutoHidden: Bool {
+        return true
+    }
+
+    public override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge {
+        return .bottom
+    }
+
     public override func viewDidLoad() {
         super.viewDidLoad()
 
+        self.setNeedsUpdateOfHomeIndicatorAutoHidden()
         
         AppUtility.lockOrientation(.landscape)
         
@@ -362,6 +372,7 @@ public class VideoPlayerViewController: UIViewController {
     
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        self.setNeedsUpdateOfHomeIndicatorAutoHidden()
         setPlayingItem()
     }
     
