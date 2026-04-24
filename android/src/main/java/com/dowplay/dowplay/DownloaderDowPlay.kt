@@ -47,90 +47,147 @@ import java.security.SecureRandom
     var myRequestCode = 1997
     var permissionToDownload = false
 
-    private fun showDownloadStatePermission() {
-        if ((ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.READ_EXTERNAL_STORAGE
-            ) != PackageManager.PERMISSION_GRANTED
-                    || ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE
-            ) != PackageManager.PERMISSION_GRANTED)
-            && (ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.READ_MEDIA_VIDEO
-            ) != PackageManager.PERMISSION_GRANTED
-                    || ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.READ_MEDIA_IMAGES
-            ) != PackageManager.PERMISSION_GRANTED)
-        ) {
-            val permissionsArray = arrayOf(
-                Manifest.permission.READ_EXTERNAL_STORAGE,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                Manifest.permission.READ_MEDIA_VIDEO,
-                Manifest.permission.READ_MEDIA_IMAGES,
-                Manifest.permission.POST_NOTIFICATIONS
-            )
-            if (ActivityCompat.shouldShowRequestPermissionRationale(
-                    lactivity,
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                )
-                || ActivityCompat.shouldShowRequestPermissionRationale(
-                    lactivity,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE
-                )
-                || ActivityCompat.shouldShowRequestPermissionRationale(
-                    lactivity,
-                    Manifest.permission.READ_MEDIA_VIDEO
-                )
-                || ActivityCompat.shouldShowRequestPermissionRationale(
-                    lactivity,
-                    Manifest.permission.READ_MEDIA_IMAGES
-                )
-                || ActivityCompat.shouldShowRequestPermissionRationale(
-                    lactivity,
-                    Manifest.permission.POST_NOTIFICATIONS
-                )
-            ) {
+//    private fun showDownloadStatePermission() {
+//        if ((ContextCompat.checkSelfPermission(
+//                context,
+//                Manifest.permission.READ_EXTERNAL_STORAGE
+//            ) != PackageManager.PERMISSION_GRANTED
+//                    || ContextCompat.checkSelfPermission(
+//                context,
+//                Manifest.permission.WRITE_EXTERNAL_STORAGE
+//            ) != PackageManager.PERMISSION_GRANTED)
+//            && (ContextCompat.checkSelfPermission(
+//                context,
+//                Manifest.permission.READ_MEDIA_VIDEO
+//            ) != PackageManager.PERMISSION_GRANTED
+//                    || ContextCompat.checkSelfPermission(
+//                context,
+//                Manifest.permission.READ_MEDIA_IMAGES
+//            ) != PackageManager.PERMISSION_GRANTED)
+//        ) {
+//            val permissionsArray = arrayOf(
+//                Manifest.permission.READ_EXTERNAL_STORAGE,
+//                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+//                Manifest.permission.READ_MEDIA_VIDEO,
+//                Manifest.permission.READ_MEDIA_IMAGES,
+//                Manifest.permission.POST_NOTIFICATIONS
+//            )
+//            if (ActivityCompat.shouldShowRequestPermissionRationale(
+//                    lactivity,
+//                    Manifest.permission.READ_EXTERNAL_STORAGE
+//                )
+//                || ActivityCompat.shouldShowRequestPermissionRationale(
+//                    lactivity,
+//                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+//                )
+//                || ActivityCompat.shouldShowRequestPermissionRationale(
+//                    lactivity,
+//                    Manifest.permission.READ_MEDIA_VIDEO
+//                )
+//                || ActivityCompat.shouldShowRequestPermissionRationale(
+//                    lactivity,
+//                    Manifest.permission.READ_MEDIA_IMAGES
+//                )
+//                || ActivityCompat.shouldShowRequestPermissionRationale(
+//                    lactivity,
+//                    Manifest.permission.POST_NOTIFICATIONS
+//                )
+//            ) {
+//
+//                if (lLang.equals("en", ignoreCase = true)) {
+//                    showExplanationForMediaFilePermission(
+//                        "Permission Needed",
+//                        "Media and file access must be granted to start downloading movies and series through the app permissions option",
+//                        permissionsArray,
+//                        true
+//                    )
+//                } else {
+//                    showExplanationForMediaFilePermission(
+//                        "منح الإذن",
+//                        "يجب منح صلاحية الوصول للوسائط والملفات لبدء تحميل الافلام والمسلسلات من خلال خيار اذونات التطبيق",
+//                        permissionsArray,
+//                        true
+//                    )
+//                }
+//            } else {
+//                if (lLang.equals("en", ignoreCase = true)) {
+//                    showExplanationForMediaFilePermission(
+//                        "Permission Needed",
+//                        "You must grant access to media and files to start downloading movies and series",
+//                        permissionsArray,
+//                        false
+//                    )
+//                } else {
+//                    showExplanationForMediaFilePermission(
+//                        "منح الإذن",
+//                        "يجب منح صلاحية الوصول للوسائط والملفات لبدء تحميل الافلام والمسلسلات",
+//                        permissionsArray,
+//                        false
+//                    )
+//                }
+//            }
+//        } else {
+//            permissionToDownload = true
+//        }
+//        ////////////////////////////////////////////////
+//        ////////////////////////////////////////////////
+//        if (ContextCompat.checkSelfPermission(
+//                context,
+//                Manifest.permission.POST_NOTIFICATIONS
+//            ) != PackageManager.PERMISSION_GRANTED
+//        ) {
+//            if (ActivityCompat.shouldShowRequestPermissionRationale(
+//                    lactivity,
+//                    Manifest.permission.POST_NOTIFICATIONS
+//                )
+//            ) {
+//                if (lLang.equals("en", ignoreCase = true)) {
+//                    showExplanationForMediaFilePermission(
+//                        "Permission Needed",
+//                        "Alerts must be granted to be able to receive notifications through the app permissions option",
+//                        arrayOf(
+//                            Manifest.permission.POST_NOTIFICATIONS
+//                        ),
+//                        true
+//                    )
+//                } else {
+//                    showExplanationForMediaFilePermission(
+//                        "منح الإذن",
+//                        "يجب منح صلاحية التنبيهات حتى تتمكن من استقبال الإشعارات من خلال خيار اذونات التطبيق",
+//                        arrayOf(
+//                            Manifest.permission.POST_NOTIFICATIONS
+//                        ), true
+//                    )
+//                }
+//
+//            } else {
+//                if (lLang.equals("en", ignoreCase = true)) {
+//                    showExplanationForMediaFilePermission(
+//                        "Permission Needed",
+//                        "Alerts must be granted to be able to receive notifications",
+//                        arrayOf(
+//                            Manifest.permission.POST_NOTIFICATIONS
+//                        ), false
+//                    )
+//                } else {
+//                    showExplanationForMediaFilePermission(
+//                        "منح الإذن",
+//                        "يجب منح صلاحية التنبيهات حتى تتمكن من استقبال الإشعارات",
+//                        arrayOf(
+//                            Manifest.permission.POST_NOTIFICATIONS
+//                        ), false
+//                    )
+//                }
+//            }
+//        }
+//    }
 
-                if (lLang.equals("en", ignoreCase = true)) {
-                    showExplanationForMediaFilePermission(
-                        "Permission Needed",
-                        "Media and file access must be granted to start downloading movies and series through the app permissions option",
-                        permissionsArray,
-                        true
-                    )
-                } else {
-                    showExplanationForMediaFilePermission(
-                        "منح الإذن",
-                        "يجب منح صلاحية الوصول للوسائط والملفات لبدء تحميل الافلام والمسلسلات من خلال خيار اذونات التطبيق",
-                        permissionsArray,
-                        true
-                    )
-                }
-            } else {
-                if (lLang.equals("en", ignoreCase = true)) {
-                    showExplanationForMediaFilePermission(
-                        "Permission Needed",
-                        "You must grant access to media and files to start downloading movies and series",
-                        permissionsArray,
-                        false
-                    )
-                } else {
-                    showExplanationForMediaFilePermission(
-                        "منح الإذن",
-                        "يجب منح صلاحية الوصول للوسائط والملفات لبدء تحميل الافلام والمسلسلات",
-                        permissionsArray,
-                        false
-                    )
-                }
-            }
-        } else {
-            permissionToDownload = true
-        }
-        ////////////////////////////////////////////////
-        ////////////////////////////////////////////////
+    private fun showDownloadStatePermission() {
+        // Storage permissions are NOT needed — files are saved to context.filesDir (private storage),
+        // which is always accessible without any runtime permissions on all Android versions.
+        permissionToDownload = true
+
+        // Only POST_NOTIFICATIONS is required (for showing download progress notification)
         if (ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS
@@ -141,47 +198,28 @@ import java.security.SecureRandom
                     Manifest.permission.POST_NOTIFICATIONS
                 )
             ) {
-                if (lLang.equals("en", ignoreCase = true)) {
-                    showExplanationForMediaFilePermission(
-                        "Permission Needed",
-                        "Alerts must be granted to be able to receive notifications through the app permissions option",
-                        arrayOf(
-                            Manifest.permission.POST_NOTIFICATIONS
-                        ),
-                        true
-                    )
-                } else {
-                    showExplanationForMediaFilePermission(
-                        "منح الإذن",
+                showExplanationForMediaFilePermission(
+                    if (lLang.equals("en", ignoreCase = true)) "Permission Needed" else "منح الإذن",
+                    if (lLang.equals("en", ignoreCase = true))
+                        "Alerts must be granted to be able to receive notifications through the app permissions option"
+                    else
                         "يجب منح صلاحية التنبيهات حتى تتمكن من استقبال الإشعارات من خلال خيار اذونات التطبيق",
-                        arrayOf(
-                            Manifest.permission.POST_NOTIFICATIONS
-                        ), true
-                    )
-                }
-
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    true
+                )
             } else {
-                if (lLang.equals("en", ignoreCase = true)) {
-                    showExplanationForMediaFilePermission(
-                        "Permission Needed",
-                        "Alerts must be granted to be able to receive notifications",
-                        arrayOf(
-                            Manifest.permission.POST_NOTIFICATIONS
-                        ), false
-                    )
-                } else {
-                    showExplanationForMediaFilePermission(
-                        "منح الإذن",
+                showExplanationForMediaFilePermission(
+                    if (lLang.equals("en", ignoreCase = true)) "Permission Needed" else "منح الإذن",
+                    if (lLang.equals("en", ignoreCase = true))
+                        "Alerts must be granted to be able to receive notifications"
+                    else
                         "يجب منح صلاحية التنبيهات حتى تتمكن من استقبال الإشعارات",
-                        arrayOf(
-                            Manifest.permission.POST_NOTIFICATIONS
-                        ), false
-                    )
-                }
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    false
+                )
             }
         }
     }
-
 
     private fun showExplanationForMediaFilePermission(
         title: String,
