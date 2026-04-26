@@ -13,7 +13,12 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     public static var shared = DownloadManager()
     public static var backgroundCompletionHandler : (() -> Void)?
     
+    // Background session: used to resume downloads if the app is terminated by the system
     private var urlSession: URLSession!
+
+    // Foreground session: used for active downloads while the app is open (full speed, no throttling)
+    private var foregroundUrlSession: URLSession!
+
 //    @Published var tasks: [URLSessionTask] = []
     var tasks: [URLSessionTask] = []
     
@@ -26,10 +31,24 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     
     override private init() {
         super.init()
+
+        // --- Background URLSession ---
+        // Kept for resuming downloads after app termination.
+        // isDiscretionary is set to false so iOS does NOT throttle or defer transfers at its discretion.
+        // isDiscretionary = true was the main cause of extremely slow download speeds.
         let config = URLSessionConfiguration.background(withIdentifier: "\(Bundle.main.bundleIdentifier!).background")
         config.sessionSendsLaunchEvents = true
-        config.isDiscretionary = true
+        config.isDiscretionary = false
+        config.allowsCellularAccess = true
         urlSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+
+        // --- Foreground URLSession ---
+        // Used while the app is in the foreground. iOS does not throttle foreground sessions,
+        // so downloads run at full available network speed.
+        let foregroundConfig = URLSessionConfiguration.default
+        foregroundConfig.allowsCellularAccess = true
+        foregroundUrlSession = URLSession(configuration: foregroundConfig, delegate: self, delegateQueue: nil)
+
         updateTasks()
     }
     
@@ -58,11 +77,15 @@ public class DownloadManager: NSObject/*, ObservableObject */{
             return nil
         }
         
-        let task = urlSession.downloadTask(with: url)
+        // Use the foreground session for immediate full-speed downloads while the app is open.
+        // The background session is kept for resuming after app termination (handled by updateTasks).
+        let task = foregroundUrlSession.downloadTask(with: url)
 
         task.taskDescription = mediaName
         task.mediaId = "\(id)_\(type.version_3_value)_\(userSignature)" //mediaID format (3255_movie) or (36970_series)
-        task.countOfBytesClientExpectsToReceive = 5 * (1024 * 1024 * 1024)
+        // countOfBytesClientExpectsToReceive removed: setting a fixed 5GB value caused iOS to
+        // classify all downloads as very large transfers and apply additional throttling.
+        // iOS will now determine the expected size automatically from the Content-Length header.
         if shouldStart{
             task.resume()
         }
