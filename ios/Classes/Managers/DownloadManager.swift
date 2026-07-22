@@ -79,7 +79,8 @@ public class DownloadManager: NSObject/*, ObservableObject */{
         
         // Use the foreground session for immediate full-speed downloads while the app is open.
         // The background session is kept for resuming after app termination (handled by updateTasks).
-        let task = foregroundUrlSession.downloadTask(with: url)
+        //let task = foregroundUrlSession.downloadTask(with: url)
+        let task = urlSession.downloadTask(with: url)
 
         task.taskDescription = mediaName
         task.mediaId = "\(id)_\(type.version_3_value)_\(userSignature)" //mediaID format (3255_movie) or (36970_series)
@@ -473,14 +474,23 @@ extension DownloadManager: URLSessionDelegate, URLSessionDownloadDelegate {
            }
     }
 
+    // public func urlSession(_: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    //     task.mediaId = nil
+    //     if let error = error {
+    //         print("error : \(error)")
+    //     } else {
+    //         print("Finish")
+    //     }
+    // }
     public func urlSession(_: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        task.mediaId = nil
-        if let error = error {
-            print("error : \(error)")
-        } else {
-            print("Finish")
-        }
+    if let error = error {
+        print("error : \(error)")
+        return
     }
+
+    task.mediaId = nil
+    print("Finish")
+}
     
     
     
