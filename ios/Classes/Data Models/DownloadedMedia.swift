@@ -126,12 +126,6 @@ public struct DownloadedMedia : Codable{
                                                  mediaGroup: group,
                                                                object: object,
             shouldStart: !(retrivalStatus == 1)){
-                
-                DownloadManager.shared.updateTasks()
-                
-//                if retrivalStatus == 1 {
-//                    task.suspend()
-//                }
                 return task.mediaId
             }
         }

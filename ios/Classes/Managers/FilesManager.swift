@@ -35,7 +35,7 @@ public class FilesManager {
             let userCacheFolder = cache
                 .appendingPathComponent(type.version_3_value)
                 .appendingPathComponent(userSignature)
-            if !checkFolderExistance(dir: userCacheFolder.absoluteString) {
+            if !checkFolderExistance(dir: userCacheFolder.path) {
                 try? fm.createDirectory(at: userCacheFolder,
                                            withIntermediateDirectories: true)
             }
@@ -249,35 +249,67 @@ public class FilesManager {
     func saveTempData(id: String, data: DownloadedMedia, user: String){
         let dirPath = cache.appendingPathComponent(user)
         let fullPath = dirPath.appendingPathComponent(id + ".keetmp")
-        if checkFolderExistance(dir: dirPath.absoluteString) == false {
+        if checkFolderExistance(dir: dirPath.path) == false {
             try? fm.createDirectory(at: dirPath, withIntermediateDirectories: true)
         }
-        print(fullPath)
         if let data = try? JSONEncoder().encode(data) {
             try? data.write(to: fullPath)
-            print("Done")
         }
     }
-    
+
     func clearTempDataFor(id: String, user: String){
         let dirPath = cache.appendingPathComponent(user)
         let fullPath = dirPath.appendingPathComponent(id + ".keetmp")
         try? fm.removeItem(at: fullPath)
     }
-    
+
+    func hasTempData(id: String, user: String)->Bool{
+        let fullPath = cache.appendingPathComponent(user).appendingPathComponent(id + ".keetmp")
+        return checkFileExistance(filePath: fullPath.path)
+    }
+
+    func getTempData(id: String, user: String)->DownloadedMedia?{
+        let fullPath = cache.appendingPathComponent(user).appendingPathComponent(id + ".keetmp")
+        guard let data = try? Data(contentsOf: fullPath) else {return nil}
+        return try? JSONDecoder().decode(DownloadedMedia.self, from: data)
+    }
+
     public func getTempData(user: String)->[DownloadedMedia]{
         var list : [DownloadedMedia] = []
         let dirPath = cache.appendingPathComponent(user)
         let contentsList = try? fm.contentsOfDirectory(at: dirPath, includingPropertiesForKeys: nil)
         for file in contentsList ?? [] {
+            guard file.pathExtension == "keetmp" else {continue}
             if let data = try? Data(contentsOf: file){
                 if var media = try? JSONDecoder().decode(DownloadedMedia.self, from: data) {
                     media.status = media.retrivalStatus == 0 ? .running : .suspended
+                    media.setUser(signature: user)
                     list.append(media)
                 }
             }
         }
         return list
+    }
+
+    //MARK: - Resume data
+    /// Bytes iOS hands back when a transfer fails, so the download can continue instead of
+    /// starting over.
+    func saveResumeData(_ data: Data, id: String, user: String){
+        let dirPath = cache.appendingPathComponent(user)
+        if checkFolderExistance(dir: dirPath.path) == false {
+            try? fm.createDirectory(at: dirPath, withIntermediateDirectories: true)
+        }
+        try? data.write(to: dirPath.appendingPathComponent(id + ".keeresume"))
+    }
+
+    func getResumeData(id: String, user: String)->Data?{
+        let fullPath = cache.appendingPathComponent(user).appendingPathComponent(id + ".keeresume")
+        return try? Data(contentsOf: fullPath)
+    }
+
+    func clearResumeData(id: String, user: String){
+        let fullPath = cache.appendingPathComponent(user).appendingPathComponent(id + ".keeresume")
+        try? fm.removeItem(at: fullPath)
     }
     
     
