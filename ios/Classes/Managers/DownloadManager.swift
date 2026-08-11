@@ -309,7 +309,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
             return media.setUser(signature: userSignature)
         }
 
-        if var pending = pendingRecords().first(where: {$0.mediaId == id && $0.mediaType == .movie}) {
+        if var pending = pendingRecords().first(where: {$0.mediaId == id && $0.mediaType == .movie}).map({asListEntry($0)}) {
             return pending.setUser(signature: userSignature)
         }
 
@@ -327,7 +327,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
         }
 
         if let pending = pendingRecords().first(where: {$0.mediaId == id && $0.mediaType == .series}) {
-            return pending
+            return asListEntry(pending)
         }
 
         return nil
@@ -455,6 +455,16 @@ public class DownloadManager: NSObject/*, ObservableObject */{
         })
     }
 
+    /// A record keeps the information needed to restart the transfer, which a live task does not
+    /// carry. The app must receive the same payload for a media wherever the entry came from, so
+    /// those extra fields are dropped on the way out.
+    private func asListEntry(_ record: DownloadedMedia) -> DownloadedMedia {
+        var entry = record
+        entry.mediaURL = nil
+        entry.retrivalStatus = nil
+        return entry
+    }
+
     /// Everything that is still being downloaded: the live tasks plus the persisted records the
     /// session no longer knows about (force quit, transfer dropped while the app was closed).
     private func downloadingMedia() -> [DownloadedMedia] {
@@ -464,7 +474,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
         media = media.filter({$0.object != nil || $0.status != .completed})
         media.append(contentsOf: pendingRecords().filter({ record in
             !media.contains(where: {$0.mediaId == record.mediaId && $0.mediaType == record.mediaType})
-        }))
+        }).map({ asListEntry($0) }))
         return media
     }
 

@@ -276,6 +276,75 @@ final class DownloadManagerTests: XCTestCase {
                       "the episode disappeared from its season")
     }
 
+    //MARK: - Response shape
+
+    /// The host app only updates the library, so nothing it reads may disappear from the payload.
+    /// An entry rebuilt from its record must carry every key the live task entry carried.
+    func testRestoredEntryKeepsTheResponseShape() {
+        configureManager()
+        startMovieDownload(id: 700_014, name: "Movie N")
+
+        guard let fromTask = entry(forMediaId: "700014") else {
+            return XCTFail("the running download is missing from the list")
+        }
+
+        // Drop the live task the way a force quit does, so the entry can only come from the record.
+        DownloadManager.shared.tasks.forEach({ $0.cancel() })
+        DownloadManager.shared.tasks.removeAll()
+
+        guard let fromRecord = entry(forMediaId: "700014") else {
+            return XCTFail("the restored download is missing from the list")
+        }
+
+        print("keys from the live task : \(Set(fromTask.keys).sorted())")
+        print("keys from the record    : \(Set(fromRecord.keys).sorted())")
+
+        XCTAssertEqual(Set(fromRecord.keys), Set(fromTask.keys),
+                       "the payload changed shape: \(Set(fromRecord.keys).symmetricDifference(Set(fromTask.keys)))")
+        XCTAssertEqual(fromRecord["mediaId"] as? String, "700014")
+        XCTAssertEqual(fromRecord["mediaType"] as? String, fromTask["mediaType"] as? String)
+        XCTAssertEqual(fromRecord["name"] as? String, fromTask["name"] as? String)
+        XCTAssertEqual(fromRecord["mediaRetrivalType"] as? String, fromTask["mediaRetrivalType"] as? String)
+        XCTAssertNotNil(fromRecord["progress"] as? Double)
+        XCTAssertNotNil(fromRecord["status"] as? Int)
+        XCTAssertEqual((fromRecord["object"] as? [String: Any])?["title"] as? String, "Movie N",
+                       "the media payload the app reads must survive the restore")
+    }
+
+    /// Same guarantee for an episode, whose entry also carries the group the app groups by.
+    func testRestoredEpisodeKeepsTheResponseShape() {
+        configureManager()
+        let group = MediaGroup(showId: "800", seasonId: "900", episodeId: "700015",
+                               seasonName: "Season 2", showName: "Another Show", data: ["id": 800])
+        DownloadManager.shared.startDownload(url: server.url(path: "/700015.mp4"),
+                                             forMediaId: 700_015,
+                                             mediaName: "Episode 5",
+                                             type: .series,
+                                             mediaGroup: group,
+                                             object: ["id": 700_015, "title": "Episode 5"])
+
+        let fromTask = DownloadManager.shared.getAllEpisodesDecoded(forSeason: "900", atSeriesID: "800")
+            .first(where: { $0["mediaId"] as? String == "700015" })
+        XCTAssertNotNil(fromTask)
+
+        DownloadManager.shared.tasks.forEach({ $0.cancel() })
+        DownloadManager.shared.tasks.removeAll()
+
+        let fromRecord = DownloadManager.shared.getAllEpisodesDecoded(forSeason: "900", atSeriesID: "800")
+            .first(where: { $0["mediaId"] as? String == "700015" })
+        guard let fromTask = fromTask, let fromRecord = fromRecord else {
+            return XCTFail("the restored episode is missing from its season")
+        }
+
+        print("episode keys from the live task : \(Set(fromTask.keys).sorted())")
+        print("episode keys from the record    : \(Set(fromRecord.keys).sorted())")
+
+        XCTAssertEqual(Set(fromRecord.keys), Set(fromTask.keys),
+                       "the payload changed shape: \(Set(fromRecord.keys).symmetricDifference(Set(fromTask.keys)))")
+        XCTAssertEqual((fromRecord["group"] as? [String: Any])?["seasonId"] as? String, "900")
+        XCTAssertEqual((fromRecord["object"] as? [String: Any])?["title"] as? String, "Episode 5")
+    }
+
     //MARK: - Task identity
 
     /// Task identifiers are only unique inside one session and are reused across launches, so the
@@ -357,6 +426,10 @@ final class DownloadManagerTests: XCTestCase {
 
     private func tasks(forMediaId mediaId: String) -> [URLSessionTask] {
         return DownloadManager.shared.tasks.filter({ $0.mediaId?.hasPrefix("\(mediaId)_") == true })
+    }
+
+    private func entry(forMediaId mediaId: String) -> [String: Any]? {
+        return DownloadManager.shared.getAllMediaDecoded().first(where: { $0["mediaId"] as? String == mediaId })
     }
 
     private func listContains(mediaId: String) -> Bool {
