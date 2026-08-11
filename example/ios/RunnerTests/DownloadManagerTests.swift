@@ -371,6 +371,105 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertEqual((fromRecord["object"] as? [String: Any])?["title"] as? String, "Episode 5")
     }
 
+    //MARK: - Damaged state files
+
+    /// The state files used to be written in place, so a process killed halfway through left a
+    /// truncated file behind. A damaged movie index used to block every future registration for
+    /// good; it must now be read from the copy kept next to it.
+    func testDamagedMovieIndexIsReadFromItsBackup() {
+        server.configuration = fastServer
+        configureManager()
+        startMovieDownload(id: 700_017, name: "Movie P")
+        XCTAssertTrue(waitUntil("the first movie to be stored") {
+            DownloadManager.shared.movieIsDownloaded("700017")
+        })
+
+        let index = FilesManager.shared.cache
+            .appendingPathComponent("movies").appendingPathComponent(signature)
+            .appendingPathComponent("dmList.keeImportant")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: index.appendingPathExtension("bak").path),
+                      "a backup of the index must be kept")
+
+        // The app was killed while the index was being rewritten.
+        try? Data("{\"700017\": {\"mediaId\": ".utf8).write(to: index)
+
+        startMovieDownload(id: 700_018, name: "Movie Q")
+        XCTAssertTrue(waitUntil("the second movie to be stored") {
+            DownloadManager.shared.movieIsDownloaded("700018")
+        })
+        XCTAssertTrue(DownloadManager.shared.movieIsDownloaded("700017"),
+                      "the movie downloaded before the damage was lost")
+    }
+
+    /// A damaged series index used to be silently replaced by a list holding only the newest show,
+    /// which erased every other show the user had downloaded.
+    func testDamagedSeriesIndexDoesNotEraseTheOtherShows() {
+        server.configuration = fastServer
+        configureManager()
+        downloadEpisode(id: 700_019, showId: "810", seasonId: "910", name: "Episode of show A")
+        // Wait for the episode to be on disk, not merely in flight: the assertions below read the
+        // persisted index, which is what the damage hits.
+        XCTAssertTrue(waitUntil("the first episode to be stored") {
+            DownloadManager.shared.episodeIsDownloaded("700019", season: "910", serise: "810")
+        })
+        XCTAssertFalse(FilesManager.shared.getSeasons(forSeriseID: "810").isEmpty)
+
+        let index = FilesManager.shared.cache
+            .appendingPathComponent("series").appendingPathComponent(signature)
+            .appendingPathComponent("serise.keeinfo")
+        try? Data("[{\"id\": \"810\", \"na".utf8).write(to: index)
+
+        downloadEpisode(id: 700_020, showId: "820", seasonId: "920", name: "Episode of show B")
+        XCTAssertTrue(waitUntil("the second episode to be stored") {
+            DownloadManager.shared.episodeIsDownloaded("700020", season: "920", serise: "820")
+        })
+
+        XCTAssertFalse(FilesManager.shared.getSeasons(forSeriseID: "810").isEmpty,
+                       "the show downloaded before the damage was erased from the index")
+    }
+
+    /// A file left at the destination by an interrupted attempt used to make the move fail, and
+    /// the media was then never registered: on disk but invisible, for good.
+    func testDownloadReplacesAnOrphanFileLeftAtItsDestination() {
+        server.configuration = fastServer
+        configureManager()
+
+        let destination = FilesManager.shared.cache
+            .appendingPathComponent("movies").appendingPathComponent(signature)
+            .appendingPathComponent("700021.mp4")
+        try? FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? Data("leftover from an interrupted attempt".utf8).write(to: destination)
+
+        startMovieDownload(id: 700_021, name: "Movie R")
+
+        XCTAssertTrue(waitUntil("the movie to be stored over the orphan file") {
+            DownloadManager.shared.movieIsDownloaded("700021")
+        })
+        XCTAssertEqual(try? Data(contentsOf: destination), expectedBody,
+                       "the orphan file was kept instead of the download")
+    }
+
+    /// Deleting a media whose stored record has no temporary file used to trap on a force unwrap.
+    func testDeletingAMediaWithoutATemporaryFileDoesNotCrash() {
+        configureManager()
+        let index = FilesManager.shared.cache
+            .appendingPathComponent("movies").appendingPathComponent(signature)
+            .appendingPathComponent("dmList.keeImportant")
+        try? FileManager.default.createDirectory(at: index.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        // tempPath is absent, the way an entry written by an older build could be.
+        let entry = """
+        {"700022": {"mediaId": "700022", "name": "Movie S", "mediaType": "movie", \
+        "mediaRetrivalType": "MovieInfo", "progress": 1}}
+        """
+        try? Data(entry.utf8).write(to: index)
+
+        DownloadManager.shared.cancelMedia(withMediaId: "700022", forType: .movie)
+
+        XCTAssertFalse(DownloadManager.shared.movieIsDownloaded("700022"))
+    }
+
     //MARK: - Task identity
 
     /// Task identifiers are only unique inside one session and are reused across launches, so the
@@ -423,6 +522,20 @@ final class DownloadManagerTests: XCTestCase {
     /// Configures the manager and waits for the reload + restore pass it triggers. A relaunched
     /// manager reloads its tasks on its own too, so the pending pass is drained first and only a
     /// reload that starts after `config` is waited on.
+    @discardableResult
+    private func downloadEpisode(id: Int, showId: String, seasonId: String, name: String) -> String {
+        let group = MediaGroup(showId: showId, seasonId: seasonId, episodeId: "\(id)",
+                               seasonName: "Season of \(showId)", showName: "Show \(showId)",
+                               data: ["id": showId])
+        DownloadManager.shared.startDownload(url: server.url(path: "/\(id).mp4"),
+                                             forMediaId: id,
+                                             mediaName: name,
+                                             type: .series,
+                                             mediaGroup: group,
+                                             object: ["id": id, "title": name])
+        return "\(id)_series_\(signature)"
+    }
+
     private func configureManager() {
         var reloads = 0
         DownloadManager.shared.didLoadPreListedTasks = { reloads += 1 }

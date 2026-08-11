@@ -116,11 +116,13 @@ public class FilesManager {
         var dmListContent = try self.getDMList()
         if var deletedItem = dmListContent.removeValue(forKey: id){
             deletedItem.signature = self.userSignature
-            try? fm.removeItem(at: deletedItem.tempPath!)
+            if let temporaryFile = deletedItem.tempPath {
+                try? fm.removeItem(at: temporaryFile)
+            }
             try? fm.removeItem(at: deletedItem.path)
             saveDMListContent(dmListContent)
         }
-        
+
     }
     
     public func deleteEpisodeById(_ id: String, season: String, series: String){
@@ -137,7 +139,9 @@ public class FilesManager {
         // remove the episode file, and info file
         var ee = e
         ee.setUser(signature: userSignature)
-        try? fm.removeItem(at: ee.tempPath!)
+        if let temporaryFile = ee.tempPath {
+            try? fm.removeItem(at: temporaryFile)
+        }
         try? fm.removeItem(at: ee.path)
         if let info = ee.episodeInfoPathURL{
             try? fm.removeItem(at: info)
@@ -222,8 +226,44 @@ public class FilesManager {
     @discardableResult
     private func moveDownloadedFile(atPath path: URL, toCacheUsingName n: String, Extension ext: String ) throws -> URL{
         let destinationURL = cache.appendingPathComponent("\(n).\(ext)")
-        try fm.moveItem(at: path, to: destinationURL)
+        // A file left over from an earlier attempt used to make the move fail, and the media was
+        // then never registered: the user had it on disk and could not see it, forever.
+        // replaceItemAt swaps the two in one step, so the old copy is only dropped once the new
+        // one is in place.
+        if checkFileExistance(filePath: destinationURL.path) {
+            _ = try fm.replaceItemAt(destinationURL, withItemAt: path)
+        } else {
+            try fm.moveItem(at: path, to: destinationURL)
+        }
         return destinationURL
+    }
+
+    //MARK: - State files
+    /// Writes a state file atomically, so a process that is killed halfway can never leave it
+    /// truncated, and keeps a copy of the last written content next to it.
+    private func writeStateFile(_ data: Data, to url: URL, keepingBackup: Bool = false) {
+        try? data.write(to: url, options: .atomic)
+        if keepingBackup {
+            try? data.write(to: backupURL(of: url), options: .atomic)
+        }
+    }
+
+    /// Decodes a state file, falling back to the copy kept from the previous write when the main
+    /// one cannot be read. Returns nil when the file was never written.
+    private func decodeStateFile<T: Decodable>(_ type: T.Type, at url: URL) throws -> T? {
+        guard checkFileExistance(filePath: url.path) else {return nil}
+        do {
+            return try JSONDecoder().decode(type, from: Data(contentsOf: url))
+        } catch {
+            let backup = backupURL(of: url)
+            guard checkFileExistance(filePath: backup.path) else {throw error}
+            print("state file is damaged, reading its backup: \(url.lastPathComponent)")
+            return try JSONDecoder().decode(type, from: Data(contentsOf: backup))
+        }
+    }
+
+    private func backupURL(of url: URL) -> URL {
+        return url.appendingPathExtension("bak")
     }
     
     private func checkFileExistance(filePath: String)->Bool{
@@ -253,7 +293,7 @@ public class FilesManager {
             try? fm.createDirectory(at: dirPath, withIntermediateDirectories: true)
         }
         if let data = try? JSONEncoder().encode(data) {
-            try? data.write(to: fullPath)
+            writeStateFile(data, to: fullPath)
         }
     }
 
@@ -299,7 +339,7 @@ public class FilesManager {
         if checkFolderExistance(dir: dirPath.path) == false {
             try? fm.createDirectory(at: dirPath, withIntermediateDirectories: true)
         }
-        try? data.write(to: dirPath.appendingPathComponent(id + ".keeresume"))
+        writeStateFile(data, to: dirPath.appendingPathComponent(id + ".keeresume"))
     }
 
     func getResumeData(id: String, user: String)->Data?{
@@ -318,19 +358,19 @@ public class FilesManager {
 //MARK: - Movie Save/Load Functions
 extension FilesManager {
     private func saveMovieInfo(_ media : DownloadedMedia){
+        guard let temporaryFile = media.tempPath else {
+            print("the finished movie has no file to store")
+            return
+        }
         do{
-            var downloadPath = media.mediaType.version_3_value + "/" + userSignature + "/" + media.mediaId
-            try self.moveDownloadedFile(atPath: media.tempPath!,
+            let downloadPath = media.mediaType.version_3_value + "/" + userSignature + "/" + media.mediaId
+            try self.moveDownloadedFile(atPath: temporaryFile,
                                         toCacheUsingName: downloadPath,
                                         Extension: "mp4")
-            
+
             var dmListContent = try getDMList()
             dmListContent[media.mediaId] = media
             saveDMListContent(dmListContent)
-            
-            try self.moveDownloadedFile(atPath: media.tempPath!,
-                                        toCacheUsingName: downloadPath,
-                                        Extension: "mp4")
         }catch{
             print(error)
         }
@@ -452,10 +492,14 @@ extension FilesManager {
     //STEP FOUR <Move the downloaded file to the {seriseID}/{seasonID}/{episodeID}.mp4 file>
     private func moveEpisodeFile(_ media: DownloadedMedia){
         guard let g = media.group else {return}
+        guard let temporaryFile = media.tempPath else {
+            print("the finished episode has no file to store")
+            return
+        }
         let downloadPath = "\(MediaManager.MediaType.series.version_3_value)/\(userSignature)/\(g.showId)/\(g.seasonId)/\(g.episodeId)"
-        
+
         do{
-            try self.moveDownloadedFile(atPath: media.tempPath!,
+            try self.moveDownloadedFile(atPath: temporaryFile,
                                         toCacheUsingName: downloadPath,
                                         Extension: "mp4")
             self.saveEpisodeInfo(media)
@@ -477,7 +521,7 @@ extension FilesManager {
             .appendingPathExtension("keeinfo")
         
         if let data = try? JSONEncoder().encode(media){
-            try? data.write(to: downloadPath)
+            writeStateFile(data, to: downloadPath)
         }
     }
 }
@@ -489,54 +533,37 @@ extension FilesManager {
     private func saveDMListContent(_ content: [String:DownloadedMedia]){
         if let data = try? JSONEncoder().encode(content){
             let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.movie.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent("dmList.keeImportant")
-            try? data.write(to: dmListFile)
+            writeStateFile(data, to: dmListFile, keepingBackup: true)
         }
     }
     
     private func getDMList() throws ->[String:DownloadedMedia]{
         let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.movie.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent("dmList.keeImportant")
         
-        if checkFileExistance(filePath: dmListFile.path){
-            let data = try Data(contentsOf: dmListFile)
-                let dmListContent = try JSONDecoder().decode([String:DownloadedMedia].self, from: data)
-                    return dmListContent
-        }
-        
-        return [:]
+        return try decodeStateFile([String:DownloadedMedia].self, at: dmListFile) ?? [:]
     }
     
     //MARK: - Serise
     private func getSeriseListFile()throws->[Info]{
         let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.series.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent("serise.keeinfo")
-        if checkFileExistance(filePath: dmListFile.path){
-            let data = try Data(contentsOf: dmListFile)
-                let dmListContent = try JSONDecoder().decode([Info].self, from: data)
-                    return dmListContent
-        }
-        return []
+        return try decodeStateFile([Info].self, at: dmListFile) ?? []
     }
     private func saveSeriseListFile(_ list: [Info]){
         if let data = try? JSONEncoder().encode(list){
             let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.series.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent("serise.keeinfo")
-            try? data.write(to: dmListFile)
+            writeStateFile(data, to: dmListFile, keepingBackup: true)
         }
     }
     
     private func getSeasonsListFile(forSerise s: String)throws->[Info]{
         let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.series.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent(s).appendingPathComponent("seasons.keeinfo")
-        if checkFileExistance(filePath: dmListFile.path){
-            let data = try Data(contentsOf: dmListFile)
-                let dmListContent = try JSONDecoder().decode([Info].self, from: data)
-                    return dmListContent
-        }
-        return []
-        
+        return try decodeStateFile([Info].self, at: dmListFile) ?? []
     }
     
     private func saveSeasonsListFile(_ list: [Info], atSerise s: String){
         if let data = try? JSONEncoder().encode(list){
             let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.series.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent(s).appendingPathComponent("seasons.keeinfo")
-            try? data.write(to: dmListFile)
+            writeStateFile(data, to: dmListFile, keepingBackup: true)
         }
     }
 }
