@@ -120,7 +120,6 @@ public class DownloadManager: NSObject/*, ObservableObject */{
         // Persist the download before anything else can go wrong: this record is what keeps the
         // media in the list (and restartable) if the app is killed or the transfer dies.
         persistRecord(for: task, url: url, status: shouldStart ? .running : .suspended)
-        retryDelay = DownloadManager.firstRetryDelay
         return task
     }
 
@@ -168,6 +167,9 @@ public class DownloadManager: NSObject/*, ObservableObject */{
 
     /// A transfer died, so try again after a while: a short outage should not leave the download
     /// waiting until the user opens the app again. The delay grows with every failure in a row.
+    /// The delay only goes back to its floor once something finishes, never when a transfer is
+    /// (re)started: a retry goes through startDownload too, and resetting there would keep a link
+    /// that always fails retrying every ten seconds for as long as the app is open.
     private func scheduleRetry() {
         guard configed else {return}
         retryWorkItem?.cancel()

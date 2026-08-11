@@ -311,6 +311,32 @@ final class DownloadManagerTests: XCTestCase {
                        "the media payload the app reads must survive the restore")
     }
 
+    /// get_download_movie answers from the record too once the task is gone, and the app reads
+    /// that payload the same way it reads a list entry.
+    func testRestoredMovieLookupKeepsTheResponseShape() {
+        configureManager()
+        startMovieDownload(id: 700_016, name: "Movie O")
+
+        guard let fromTask = DownloadManager.shared.getDownloadedMovie("700016")?.getObjectAsJSONDictionary() else {
+            return XCTFail("the running download is not returned by get_download_movie")
+        }
+
+        DownloadManager.shared.tasks.forEach({ $0.cancel() })
+        DownloadManager.shared.tasks.removeAll()
+
+        guard let fromRecord = DownloadManager.shared.getDownloadedMovie("700016")?.getObjectAsJSONDictionary() else {
+            return XCTFail("get_download_movie lost the download once its task was gone")
+        }
+
+        print("get_download_movie keys from the live task : \(Set(fromTask.keys).sorted())")
+        print("get_download_movie keys from the record    : \(Set(fromRecord.keys).sorted())")
+
+        XCTAssertEqual(Set(fromRecord.keys), Set(fromTask.keys),
+                       "the payload changed shape: \(Set(fromRecord.keys).symmetricDifference(Set(fromTask.keys)))")
+        XCTAssertEqual((fromRecord["object"] as? [String: Any])?["title"] as? String, "Movie O")
+        XCTAssertNotNil(fromRecord["status"] as? Int)
+    }
+
     /// Same guarantee for an episode, whose entry also carries the group the app groups by.
     func testRestoredEpisodeKeepsTheResponseShape() {
         configureManager()
