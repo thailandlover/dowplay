@@ -84,6 +84,8 @@ for a second or two as a row with no data. This was seen for real while running 
 
 ## `ios/Classes/Managers/FilesManager.swift`
 
+### Support for the record layer
+
 | Change | Why | Origin |
 | --- | --- | --- |
 | Added `hasTempData(id:user:)` and `getTempData(id:user:)` | The delegate needs to know whether a media is still wanted (not cancelled) and what state it was in, without loading every record | Supports the record layer |
@@ -91,6 +93,20 @@ for a second or two as a row with no data. This was seen for real while running 
 | `getTempData(user:)` now skips files that are not `.keetmp` and stamps the decoded media with its owner signature | The folder also holds resume data now, and a decoded record needs its signature to resolve its own paths | Supports the record layer |
 | `checkFolderExistance(dir:)` is fed `url.path` instead of `url.absoluteString`, in `saveTempData` and `forUser` | `absoluteString` is a `file://` URL, so the check never matched and the directory was recreated on every call | **Pre-existing** (harmless, fixed while nearby) |
 | Removed the `print` calls from `saveTempData` | It now runs on every download start, pause and failure | Housekeeping |
+
+### Making the state files survive a kill
+
+Every state file was written in place: the file is truncated first and the new content written
+after, so a process killed in between leaves a truncated file. These files are written exactly when
+the app is most likely to be killed, right after a download finishes in the background.
+
+| Change | Why | Origin |
+| --- | --- | --- |
+| All six state files are written with `.atomic` (`dmList.keeImportant`, `serise.keeinfo`, `seasons.keeinfo`, the per-episode `.keeinfo`, `.keetmp`, `.keeresume`) | An atomic write lands in one step, so a kill leaves the previous version untouched instead of a half written file | **Pre-existing** |
+| The three index files keep a copy of the last written content next to them (`.bak`), and `decodeStateFile` reads it when the main file cannot be decoded | A damaged `dmList.keeImportant` made `getDMList()` throw for good: every downloaded movie disappeared from the list **and** no new one could ever be registered again, permanently. A damaged `serise.keeinfo` was worse: `addSeries` falls back to an empty list and writes over it, silently erasing every other show the user had downloaded | **Pre-existing** |
+| When neither copy can be read, the damaged file is moved aside as `.corrupt` and the library starts from an empty index | Otherwise a user damaged before this version shipped stays blocked forever. Nothing is deleted: the bytes are kept for inspection, and the media files stay on disk | **Pre-existing** |
+| `moveDownloadedFile` uses `replaceItemAt` when something already sits at the destination, and the duplicated second move in `saveMovieInfo` is gone | A file left at the destination by an interrupted attempt made the move throw, and the media was then never registered: downloaded, taking space, invisible forever. The second move always failed and only printed an error | **Pre-existing** |
+| The four `tempPath` force unwraps in `saveMovieInfo`, `moveEpisodeFile`, `deleteMovieBy` and `deleteEpisode` are guarded | A stored entry without a temporary file traps on delete and takes the app down. The library never writes such an entry, but a legacy or damaged one does exist in the wild, and a test reproduces the crash | **Pre-existing** |
 
 ## `ios/Classes/Data Models/DownloadedMedia.swift`
 
@@ -106,7 +122,8 @@ Nothing below ships in the plugin; it only exists so the fix can be proven and k
 
 | File | Change | Why |
 | --- | --- | --- |
-| `example/ios/RunnerTests/DownloadManagerTests.swift` | New: 16 tests driving the real `DownloadManager` | Covers the reported regression, relaunch, force quit, interrupted transfer, stalled transfer, error responses, pause, cancel, series grouping, task identity and the response shape |
+| `example/ios/RunnerTests/DownloadManagerTests.swift` | New: 22 tests driving the real `DownloadManager` | Covers the reported regression, relaunch, force quit, interrupted transfer, stalled transfer, error responses, pause, cancel, series grouping, task identity and the response shape |
+| `example/ios/RunnerTests/ResponseShapeSnapshotTests.swift` | New: prints every payload the plugin returns | Uses only API that exists before and after the fix, so the shapes can be captured from an older build of the library and compared |
 | `example/ios/RunnerTests/LocalHTTPServer.swift` | New: a small HTTP/1.1 server inside the test process | Gives the tests full control of the network: throttling, range requests (needed to verify a resumed transfer), dropping a connection mid-body, and hanging without closing |
 | `example/ios/Runner.xcodeproj/project.pbxproj` | Added the `RunnerTests` unit-test bundle hosted by `Runner`, linking `dowplay` | There was no test target in the repository at all |
 | `example/ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme` | `RunnerTests` added to the scheme's test action | So `xcodebuild test -scheme Runner` runs the suite |
@@ -155,7 +172,7 @@ seconds; the stall test alone accounts for roughly 30 of them.
 
 ## Verification performed
 
-* 16/16 tests pass on an iPhone 16 simulator (iOS 18.0).
+* 23/23 tests pass on an iPhone 16 simulator (iOS 18.0).
 * Mutation checks: restoring the pre-fix behaviour (foreground session, list replacement, no
   records) makes the suite fail with `the running download disappeared from the list`; removing the
   owner recovery in `didFinishDownloadingTo` makes the completed file never reach its user folder.
@@ -173,9 +190,8 @@ seconds; the stall test alone accounts for roughly 30 of them.
   queued tasks still report as running to the app. Android has no cap either: `DownloadService.kt`
   initialises PRDownloader with database and timeouts only, so it uses the library's default pool
   of `2 × availableProcessors` threads.
-* `FilesManager.saveMovieInfo` moves the downloaded file twice; the second move always fails and is
-  swallowed.
-* `deleteMovieBy` and `deleteEpisode` force-unwrap `tempPath`, which can crash for a media that has
-  no temp path.
+* **The list is not filtered by user.** `getAllMedia` returns every live task, so after a profile
+  switch the previous profile's in-flight downloads are still listed. The records on disk are
+  already per-user; only the live-task path leaks. Deliberately left for a later change.
 * `getAllMedia` reads the records from disk on the calling (main) thread. Fine for the handful of
   downloads a user has, but it is file I/O on the UI thread.

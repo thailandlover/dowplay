@@ -820,7 +820,7 @@ public func saveDownloadStatus(){
 
 # الملف الثاني: `ios/Classes/Managers/FilesManager.swift`
 
-خمس تعديلات، كلها إضافات أو تصحيحات داخلية. **ولا واحد فيها بيلمس شكل الريسبونس.**
+عشرة تعديلات: خمسة لدعم طبقة السجلات، وخمسة لتحصين ملفات الحالة ضد التلف والانهيار. **ولا واحد فيها بيلمس شكل الريسبونس.**
 
 ## 2-1. دوال قراءة السجل
 
@@ -931,6 +931,219 @@ if checkFolderExistance(dir: dirPath.path) == false {
 
 كانت بتطبع مسار كل ملف وكلمة "Done". صارت تنكتب مع كل بدء/إيقاف/فشل تحميل، فشيلتها. **أثر على الريسبونس:** لا يوجد.
 
+## 2-6. الكتابة الذرّية لكل ملفات الحالة
+
+</div>
+
+**قبل**
+
+```swift
+private func saveDMListContent(_ content: [String:DownloadedMedia]){
+    if let data = try? JSONEncoder().encode(content){
+        let dmListFile = cache.appendingPathComponent(...).appendingPathComponent("dmList.keeImportant")
+        try? data.write(to: dmListFile)          // يفضّي الملف أولاً ثم يكتب
+    }
+}
+```
+
+**بعد**
+
+```swift
+/// Writes a state file atomically, so a process that is killed halfway can never leave it
+/// truncated, and keeps a copy of the last written content next to it.
+private func writeStateFile(_ data: Data, to url: URL, keepingBackup: Bool = false) {
+    try? data.write(to: url, options: .atomic)
+    if keepingBackup {
+        try? data.write(to: backupURL(of: url), options: .atomic)
+    }
+}
+```
+
+<div dir="rtl" align="right">
+
+**ليش:** الكتابة العادية بتفضّي الملف ثم بتكتب المحتوى — نافذة زمنية لو انقتل التطبيق فيها بيضل الملف مبتور. الذرّية بتكتب على ملف مؤقت ثم بتبدّل بعملية `rename` لا تتجزأ.
+
+**السيناريو:** المستخدم خلص تحميل فيلم والتطبيق بالخلفية → المكتبة بتكتب فهرس الأفلام → iOS بيقتل التطبيق بهاي اللحظة (ضغط ذاكرة) → الملف بيصير JSON نص.
+
+**الملفات المشمولة (6):** `dmList.keeImportant`، `serise.keeinfo`، `seasons.keeinfo`، ملف الحلقة `.keeinfo`، سجلاتي `.keetmp`، وبايتات الاستكمال `.keeresume`.
+
+**أثر على الريسبونس:** لا يوجد.
+
+## 2-7. نسخة احتياطية للفهارس والقراءة منها
+
+</div>
+
+**قبل**
+
+```swift
+private func getDMList() throws ->[String:DownloadedMedia]{
+    if checkFileExistance(filePath: dmListFile.path){
+        let data = try Data(contentsOf: dmListFile)
+        let dmListContent = try JSONDecoder().decode([String:DownloadedMedia].self, from: data)
+        return dmListContent            // ملف تالف = خطأ للأبد
+    }
+    return [:]
+}
+```
+
+**بعد**
+
+```swift
+private func getDMList() throws ->[String:DownloadedMedia]{
+    let dmListFile = ...
+    return decodeStateFile([String:DownloadedMedia].self, at: dmListFile) ?? [:]
+}
+
+private func decodeStateFile<T: Decodable>(_ type: T.Type, at url: URL) -> T? {
+    guard checkFileExistance(filePath: url.path) else {return nil}
+
+    if let data = try? Data(contentsOf: url), let decoded = try? JSONDecoder().decode(type, from: data) {
+        return decoded
+    }
+
+    let backup = backupURL(of: url)
+    if let data = try? Data(contentsOf: backup), let decoded = try? JSONDecoder().decode(type, from: data) {
+        print("state file is damaged, read from its backup: \(url.lastPathComponent)")
+        return decoded
+    }
+
+    keepDamagedStateFile(at: url)
+    return nil
+}
+```
+
+<div dir="rtl" align="right">
+
+**ليش:** حتى مع الذرّية، ممكن يصير تلف من مصدر ثاني (خلل تخزين، انطفاء مفاجئ). النسخة الاحتياطية بتخلي أسوأ خسارة هي **آخر تغيير فقط** بدل الفهرس كامل.
+
+**السيناريو الأول (فهرس الأفلام):** ملف `dmList.keeImportant` انتلف → بالقديم `getDMList()` بترمي خطأ للأبد → كل أفلام المستخدم اختفت، **وولا فيلم جديد بينسجل بعدها أبداً**، بشكل دائم وبدون أي طريقة تعافي.
+
+**السيناريو الثاني (فهرس المسلسلات) — وهذا أخبث:** `addSeries` كانت بتعمل `(try? getSeriseListFile()) ?? []` — يعني ملف تالف = قائمة فاضية → بتضيف المسلسل الجديد وبتكتب فوق القديم → **كل مسلسلات المستخدم بتتمسح من الفهرس بصمت**، وملفاتها بتضل آخذة مساحة. هذا مثبت باختبار سقط على الكود القديم بالرسالة: `the show downloaded before the damage was erased from the index`.
+
+**أثر على الريسبونس:** لا يوجد.
+
+## 2-8. التعافي لما تتلف النسختين
+
+</div>
+
+**بعد (جديد)**
+
+```swift
+/// Moves an unreadable state file aside instead of letting the next write overwrite it, so
+/// nothing is destroyed and the file can still be looked at.
+private func keepDamagedStateFile(at url: URL) {
+    let kept = url.appendingPathExtension("corrupt")
+    guard !checkFileExistance(filePath: kept.path) else {
+        print("state file is unreadable: \(url.lastPathComponent)")
+        return
+    }
+    try? fm.moveItem(at: url, to: kept)
+    print("state file is unreadable, kept as \(kept.lastPathComponent)")
+}
+```
+
+<div dir="rtl" align="right">
+
+**ليش:** المستخدم اللي ملفه تالف **من قبل** هذا التحديث ما عنده نسخة احتياطية. بدون هالمسار بيضل معطّل للأبد. مثبت باختبار: على الكود بدون هالجزء، الاختبار سقط برسالة `Timed out waiting for downloads to work again`.
+
+**المقايضة (اللي وافقت عليها):** بنبلّش بفهرس فاضي، يعني الأفلام القديمة بتضل مخفية وملفاتها يتيمة على القرص — بس التحميل بيرجع يشتغل. **ما بنمسح ولا ملف**: التالف بينحفظ بلاحقة `.corrupt`.
+
+**أثر على الريسبونس:** لا يوجد.
+
+## 2-9. استبدال الملف بدل فشل النقل
+
+</div>
+
+**قبل**
+
+```swift
+private func moveDownloadedFile(atPath path: URL, toCacheUsingName n: String, Extension ext: String ) throws -> URL{
+    let destinationURL = cache.appendingPathComponent("\(n).\(ext)")
+    try fm.moveItem(at: path, to: destinationURL)      // بترمي خطأ لو الوجهة مشغولة
+    return destinationURL
+}
+```
+
+**بعد**
+
+```swift
+private func moveDownloadedFile(atPath path: URL, toCacheUsingName n: String, Extension ext: String ) throws -> URL{
+    let destinationURL = cache.appendingPathComponent("\(n).\(ext)")
+    // A file left over from an earlier attempt used to make the move fail, and the media was
+    // then never registered: the user had it on disk and could not see it, forever.
+    // replaceItemAt swaps the two in one step, so the old copy is only dropped once the new
+    // one is in place.
+    if checkFileExistance(filePath: destinationURL.path) {
+        _ = try fm.replaceItemAt(destinationURL, withItemAt: path)
+    } else {
+        try fm.moveItem(at: path, to: destinationURL)
+    }
+    return destinationURL
+}
+```
+
+<div dir="rtl" align="right">
+
+**ليش:** لو ضل ملف يتيم بمكان الوجهة، `moveItem` بترمي خطأ، والكود بيقفز للـ`catch` **قبل** ما يسجّل الفيلم بالفهرس → الفيلم على القرص وما إله وجود بالتطبيق، وكل محاولة إعادة تحميل بتفشل بنفس الطريقة للأبد.
+
+**ليش `replaceItemAt` مش "امسح ثم انقل":** المسح اليدوي فيه لحظة يكون فيها المستخدم فقد نسخته القديمة والجديدة لسه ما وصلت. `replaceItemAt` بتبدّل بعملية ذرّية على مستوى النظام: النسخة القديمة ما بتُمسح إلا بعد ما الجديدة تستقر.
+
+**كمان:** انحذفت النقلة الثانية المكررة في `saveMovieInfo` — كانت بتفشل كل مرة وتطبع خطأ (الملف انتقل بالنقلة الأولى).
+
+**أثر على الريسبونس:** لا يوجد.
+
+## 2-10. حماية `tempPath` في مسارات التخزين والحذف
+
+</div>
+
+**قبل**
+
+```swift
+// deleteMovieBy
+try? fm.removeItem(at: deletedItem.tempPath!)
+
+// deleteEpisode
+try? fm.removeItem(at: ee.tempPath!)
+
+// saveMovieInfo / moveEpisodeFile
+try self.moveDownloadedFile(atPath: media.tempPath!, ...)
+```
+
+**بعد**
+
+```swift
+// deleteMovieBy / deleteEpisode
+if let temporaryFile = deletedItem.tempPath {
+    try? fm.removeItem(at: temporaryFile)
+}
+
+// saveMovieInfo / moveEpisodeFile
+guard let temporaryFile = media.tempPath else {
+    print("the finished movie has no file to store")
+    return
+}
+```
+
+<div dir="rtl" align="right">
+
+**ليش:** `!` على قيمة `nil` بتنهي التطبيق فوراً — و`do/catch` **ما بتمسكها** (هي trap مش خطأ).
+
+**قابلية الحدوث:** فحصت تاريخ الريبو كامل — `tempPath` موجود في `CodingKeys` من أول نسخة، والمكتبة ما بتكتب سجل بدونه، و`remove(signature:)` (المسار الوحيد اللي ممكن يمرّر `nil`) ما إله ولا مُنادي. يعني ببيانات المكتبة نفسها المسار غير قابل للوصول.
+
+**بس:** لما حطيت بالاختبار سجل قديم بدون الحقل، الانهيار صار فوراً:
+
+</div>
+
+```text
+dowplay/FilesManager.swift:119: Fatal error: Unexpectedly found nil while unwrapping an Optional value
+```
+
+<div dir="rtl" align="right">
+
+فالحماية مبررة لأي بيانات قديمة أو تالفة خارج ما نتوقعه.
+
+**أثر على الريسبونس:** لا يوجد.
+
 </div>
 
 ---
@@ -995,7 +1208,7 @@ func reCallRequest()->String?{
 
 | الملف | التغيير | ليش |
 | --- | --- | --- |
-| `example/ios/RunnerTests/DownloadManagerTests.swift` | جديد — 16 اختبار | يغطّي الاختفاء، إعادة التشغيل، قتل التطبيق، الانقطاع، التجمّد، ردود الخطأ، الإيقاف، الإلغاء، تجميع المسلسلات، الهوية، وشكل الريسبونس |
+| `example/ios/RunnerTests/DownloadManagerTests.swift` | جديد — 22 اختبار | يغطّي الاختفاء، إعادة التشغيل، قتل التطبيق، الانقطاع، التجمّد، ردود الخطأ، الإيقاف، الإلغاء، تجميع المسلسلات، الهوية، شكل الريسبونس، والفهارس التالفة |
 | `example/ios/RunnerTests/ResponseShapeSnapshotTests.swift` | جديد | بيطبع شكل كل ريسبونس؛ بيشتغل على النسخة القديمة والجديدة عشان المقارنة في القسم 0 |
 | `example/ios/RunnerTests/LocalHTTPServer.swift` | جديد | سيرفر HTTP داخل الاختبار: بيبطّئ، بيدعم Range، بيقطع الاتصال، وبيعلّقه |
 | `example/ios/Runner.xcodeproj/project.pbxproj` | إضافة هدف `RunnerTests` | ما كان في أي هدف اختبار بالمشروع |

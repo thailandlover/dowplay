@@ -401,6 +401,34 @@ final class DownloadManagerTests: XCTestCase {
                       "the movie downloaded before the damage was lost")
     }
 
+    /// When neither the index nor its backup can be read, the user must not stay blocked: the
+    /// damaged file is kept aside and the library starts from an empty index.
+    func testUnreadableMovieIndexStartsFreshAndKeepsTheDamagedFile() {
+        server.configuration = fastServer
+        configureManager()
+        startMovieDownload(id: 700_023, name: "Movie T")
+        XCTAssertTrue(waitUntil("the first movie to be stored") {
+            DownloadManager.shared.movieIsDownloaded("700023")
+        })
+
+        // Both copies are damaged, which is the state of a user hit before this version shipped.
+        let index = FilesManager.shared.cache
+            .appendingPathComponent("movies").appendingPathComponent(signature)
+            .appendingPathComponent("dmList.keeImportant")
+        let damaged = Data("{\"700023\": {\"medi".utf8)
+        try? damaged.write(to: index)
+        try? damaged.write(to: index.appendingPathExtension("bak"))
+
+        startMovieDownload(id: 700_024, name: "Movie U")
+        XCTAssertTrue(waitUntil("downloads to work again") {
+            DownloadManager.shared.movieIsDownloaded("700024")
+        })
+
+        let kept = index.appendingPathExtension("corrupt")
+        XCTAssertEqual(try? Data(contentsOf: kept), damaged,
+                       "the damaged index must be kept instead of being overwritten")
+    }
+
     /// A damaged series index used to be silently replaced by a list holding only the newest show,
     /// which erased every other show the user had downloaded.
     func testDamagedSeriesIndexDoesNotEraseTheOtherShows() {

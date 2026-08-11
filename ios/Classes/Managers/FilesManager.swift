@@ -249,17 +249,36 @@ public class FilesManager {
     }
 
     /// Decodes a state file, falling back to the copy kept from the previous write when the main
-    /// one cannot be read. Returns nil when the file was never written.
-    private func decodeStateFile<T: Decodable>(_ type: T.Type, at url: URL) throws -> T? {
+    /// one cannot be read. Returns nil when the file was never written, or when neither copy can
+    /// be read: the caller then starts from an empty list instead of staying blocked forever.
+    private func decodeStateFile<T: Decodable>(_ type: T.Type, at url: URL) -> T? {
         guard checkFileExistance(filePath: url.path) else {return nil}
-        do {
-            return try JSONDecoder().decode(type, from: Data(contentsOf: url))
-        } catch {
-            let backup = backupURL(of: url)
-            guard checkFileExistance(filePath: backup.path) else {throw error}
-            print("state file is damaged, reading its backup: \(url.lastPathComponent)")
-            return try JSONDecoder().decode(type, from: Data(contentsOf: backup))
+
+        if let data = try? Data(contentsOf: url), let decoded = try? JSONDecoder().decode(type, from: data) {
+            return decoded
         }
+
+        let backup = backupURL(of: url)
+        if let data = try? Data(contentsOf: backup), let decoded = try? JSONDecoder().decode(type, from: data) {
+            print("state file is damaged, read from its backup: \(url.lastPathComponent)")
+            return decoded
+        }
+
+        keepDamagedStateFile(at: url)
+        return nil
+    }
+
+    /// Moves an unreadable state file aside instead of letting the next write overwrite it, so
+    /// nothing is destroyed and the file can still be looked at.
+    private func keepDamagedStateFile(at url: URL) {
+        let kept = url.appendingPathExtension("corrupt")
+        guard !checkFileExistance(filePath: kept.path) else {
+            // An older copy is already kept; the unreadable one is replaced by the next write.
+            print("state file is unreadable: \(url.lastPathComponent)")
+            return
+        }
+        try? fm.moveItem(at: url, to: kept)
+        print("state file is unreadable, kept as \(kept.lastPathComponent)")
     }
 
     private func backupURL(of url: URL) -> URL {
@@ -540,13 +559,13 @@ extension FilesManager {
     private func getDMList() throws ->[String:DownloadedMedia]{
         let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.movie.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent("dmList.keeImportant")
         
-        return try decodeStateFile([String:DownloadedMedia].self, at: dmListFile) ?? [:]
+        return decodeStateFile([String:DownloadedMedia].self, at: dmListFile) ?? [:]
     }
     
     //MARK: - Serise
     private func getSeriseListFile()throws->[Info]{
         let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.series.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent("serise.keeinfo")
-        return try decodeStateFile([Info].self, at: dmListFile) ?? []
+        return decodeStateFile([Info].self, at: dmListFile) ?? []
     }
     private func saveSeriseListFile(_ list: [Info]){
         if let data = try? JSONEncoder().encode(list){
@@ -557,7 +576,7 @@ extension FilesManager {
     
     private func getSeasonsListFile(forSerise s: String)throws->[Info]{
         let dmListFile = cache.appendingPathComponent(MediaManager.MediaType.series.version_3_value, isDirectory: true).appendingPathComponent(userSignature).appendingPathComponent(s).appendingPathComponent("seasons.keeinfo")
-        return try decodeStateFile([Info].self, at: dmListFile) ?? []
+        return decodeStateFile([Info].self, at: dmListFile) ?? []
     }
     
     private func saveSeasonsListFile(_ list: [Info], atSerise s: String){
