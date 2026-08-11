@@ -53,7 +53,34 @@ The bulk of the work. Public API and method-channel payloads are unchanged.
 | 15 | `cancelTask` deletes the record, the resume data and the stored media payload before cancelling | The payload key in UserDefaults used to leak forever, and without deleting the record first the cancellation callback would bring the download back | **Pre-existing** |
 | 16 | `resumeDownload` falls back to restarting from the record when no live task exists | Resuming a media whose transfer died while the app was closed used to do nothing | **Pre-existing** |
 | 17 | `saveDownloadStatus()` only persists records now; it no longer cancels every task | Cancelling transfers is exactly what must not happen when the app goes to the background with a background session. The method had no caller, so this changes nothing for existing users | **Pre-existing** |
-| 18 | Internal test seams: `sessionIdentifierOverride`, `simulateAppRelaunch(completion:)`, `forgetConfiguration()`, `stallCheckInterval` | Needed to simulate a relaunch and a background hand-over in tests. All are `internal`, so they are not part of the framework's public API | Test support |
+| 18 | `asListEntry(_:)` strips `mediaURL` and `retrivalStatus` from records before they leave the manager | A record carries restart information a live task does not. Without this, an entry rebuilt from disk reached Flutter with two keys the same media did not have while its task was alive. The host app must receive the same payload for a media wherever the entry came from | Follows from #4 |
+| 19 | Internal test seams: `sessionIdentifierOverride`, `simulateAppRelaunch(completion:)`, `forgetConfiguration()`, `stallCheckInterval` | Needed to simulate a relaunch and a background hand-over in tests. All are `internal`, so they are not part of the framework's public API | Test support |
+
+### Why row 3 was worth changing even though it was not the reported bug
+
+Replacing the list was safe as long as the session being queried was also the session creating the
+tasks, which was the case before `3577bfb`. It was not completely safe, because `getAllTasks` is
+asynchronous: it answers with a snapshot taken when the question was asked, and replacing the list
+with that snapshot throws away anything that started in between.
+
+| Time | What happens (pre-`3577bfb` code, single background session) |
+| --- | --- |
+| `t = 0 ms` | The app starts and Flutter calls `config_downloader`. That first access creates `DownloadManager.shared`, whose `init()` calls `updateTasks()`, which asks the download daemon for its tasks |
+| `t = 5 ms` | The user taps download on an episode. `startDownload` creates the task and appends it, and `getAllMediaDecoded()` returns a list containing it, so the app shows it |
+| `t = 120 ms` | The answer to the question asked at `t = 0` arrives. It is a snapshot of a moment when the task did not exist yet, and `self.tasks` is replaced by it: the download is gone from memory |
+| after | The transfer keeps running at system level, but nothing shows it. In the old code only `reCallRequest` called `updateTasks` again, and that path was dead, so the entry stayed missing for the rest of the session |
+
+The window is narrow, so this stayed a rare bug rather than a reported one. It also becomes a
+different kind of problem once downloads have records on disk: `config()` restores from the records
+right after `updateTasks`, so a list emptied by a stale snapshot makes the restore believe nothing
+is running and start a **second transfer of a download that is already live** — double the data,
+two temp files, and an orphaned first transfer. The merge closes both, and
+`testRunningDownloadSurvivesReconfiguration` asserts the server only ever receives one request per
+media.
+
+The same row also stops accepting tasks in `.canceling`. A cancelled task lingers in that state for
+a moment, and `cancelTask` has already removed its payload, so it used to come back into the list
+for a second or two as a row with no data. This was seen for real while running the suite.
 
 ## `ios/Classes/Managers/FilesManager.swift`
 
@@ -79,7 +106,7 @@ Nothing below ships in the plugin; it only exists so the fix can be proven and k
 
 | File | Change | Why |
 | --- | --- | --- |
-| `example/ios/RunnerTests/DownloadManagerTests.swift` | New: 14 tests driving the real `DownloadManager` | Covers the reported regression, relaunch, force quit, interrupted transfer, stalled transfer, error responses, pause, cancel, series grouping and task identity |
+| `example/ios/RunnerTests/DownloadManagerTests.swift` | New: 16 tests driving the real `DownloadManager` | Covers the reported regression, relaunch, force quit, interrupted transfer, stalled transfer, error responses, pause, cancel, series grouping, task identity and the response shape |
 | `example/ios/RunnerTests/LocalHTTPServer.swift` | New: a small HTTP/1.1 server inside the test process | Gives the tests full control of the network: throttling, range requests (needed to verify a resumed transfer), dropping a connection mid-body, and hanging without closing |
 | `example/ios/Runner.xcodeproj/project.pbxproj` | Added the `RunnerTests` unit-test bundle hosted by `Runner`, linking `dowplay` | There was no test target in the repository at all |
 | `example/ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme` | `RunnerTests` added to the scheme's test action | So `xcodebuild test -scheme Runner` runs the suite |
@@ -90,12 +117,29 @@ Nothing below ships in the plugin; it only exists so the fix can be proven and k
 
 ## What the host app sees
 
-* No change to the method channel: same methods, same arguments, same dictionaries.
+The host app only updates the library; nothing on the Flutter side has to change.
+
+**The response shape is unchanged.** Same methods, same arguments, same dictionaries, same keys.
+An in-flight entry carries exactly these keys, whether it comes from a live task or was rebuilt
+from its record after a relaunch:
+
+```text
+mediaId, mediaType, mediaRetrivalType, name, progress, status, object
+                                                     (+ group for an episode)
+```
+
+Two tests lock this down and fail on any difference, in either direction:
+`testRestoredEntryKeepsTheResponseShape` and `testRestoredEpisodeKeepsTheResponseShape` read the
+same media through `getAllMediaDecoded()` while its task is alive, drop the task, read it again
+from the record, and compare the two key sets for exact equality.
+
+Behaviour differences, all within that same shape:
+
 * A media now stays in the list until it finishes or is cancelled, including across app relaunches
-  and outages. Entries restored from disk carry the last known `progress` until the transfer
+  and outages. An entry rebuilt from disk carries the last known `progress` until the transfer
   reports again.
-* A download that answered with an HTTP error is reported as paused (`retrivalStatus = 1`) instead
-  of appearing as a completed media.
+* A download that answered with an HTTP error is reported with `status = 1` (paused) instead of
+  appearing as a completed media.
 * `saveDownloadStatus()` no longer cancels the running transfers.
 
 ## Running the tests
@@ -111,7 +155,7 @@ seconds; the stall test alone accounts for roughly 30 of them.
 
 ## Verification performed
 
-* 14/14 tests pass on an iPhone 16 simulator (iOS 18.0).
+* 16/16 tests pass on an iPhone 16 simulator (iOS 18.0).
 * Mutation checks: restoring the pre-fix behaviour (foreground session, list replacement, no
   records) makes the suite fail with `the running download disappeared from the list`; removing the
   owner recovery in `didFinishDownloadingTo` makes the completed file never reach its user folder.
