@@ -423,13 +423,13 @@ final class DownloadManagerTests: XCTestCase {
         configureManager()
         (700_044...700_047).forEach({ startMovieDownload(id: $0, name: "Movie \($0)") })
         spin(for: 1)
-        XCTAssertFalse(DownloadManager.shared.isDownloadingMediaWithID("700047", ofType: .movie),
-                       "the fourth media should be waiting, not running")
+        XCTAssertTrue(tasks(forMediaId: "700047").isEmpty,
+                      "the fourth media should be waiting, with no transfer behind it")
 
         DownloadManager.shared.cancelMedia(withMediaId: "700044", forType: .movie)
 
         XCTAssertTrue(waitUntil("the waiting media to take the free slot") {
-            DownloadManager.shared.isDownloadingMediaWithID("700047", ofType: .movie)
+            self.tasks(forMediaId: "700047").first?.state == .running
         })
         XCTAssertEqual(DownloadManager.shared.tasks.filter({ $0.state == .running }).count,
                        DownloadManager.maxActiveDownloads)
@@ -448,6 +448,71 @@ final class DownloadManagerTests: XCTestCase {
         for id in 700_048...700_053 {
             XCTAssertTrue(listContains(mediaId: "\(id)"), "\(id) was lost across the relaunch")
         }
+    }
+
+    //MARK: - What the player asks about a media
+
+    /// The download button in the player asks these three questions. A media waiting its turn has
+    /// no task behind it, and it must still answer "this one is downloading", otherwise the button
+    /// looks untouched and the user starts it again.
+    func testAMediaWaitingItsTurnStillAnswersAsDownloading() {
+        configureManager()
+        (700_054...700_058).forEach({ startMovieDownload(id: $0, name: "Movie \($0)") })
+        spin(for: 1)
+
+        let waiting = "700058"
+        XCTAssertFalse(tasks(forMediaId: waiting).count > 0, "this one is meant to be waiting, not running")
+
+        XCTAssertTrue(DownloadManager.shared.isDownloadingMediaWithID(waiting, ofType: .movie),
+                      "the player would show its download button as untouched")
+        XCTAssertFalse(DownloadManager.shared.isDownloadingMediaWithIDSuspended(waiting, ofType: .movie),
+                       "waiting for a slot is not the same as paused by the user")
+        XCTAssertNotNil(DownloadManager.shared.getDownloadProgress(ForMediaId: waiting, ofMediaType: .movie),
+                        "the player reads the percentage from here")
+    }
+
+    /// And a media the user paused while it was waiting has to answer as paused, not as running.
+    func testAWaitingMediaThatWasPausedAnswersAsPaused() {
+        configureManager()
+        (700_059...700_063).forEach({ startMovieDownload(id: $0, name: "Movie \($0)") })
+        spin(for: 1)
+
+        let waiting = "700063"
+        DownloadManager.shared.pauseDownload(forMediaId: waiting, ofType: .movie)
+
+        XCTAssertTrue(DownloadManager.shared.isDownloadingMediaWithID(waiting, ofType: .movie))
+        XCTAssertTrue(DownloadManager.shared.isDownloadingMediaWithIDSuspended(waiting, ofType: .movie),
+                      "the player would offer to pause a media that is already paused")
+    }
+
+    /// A finished media answers as not downloading any more, which is what turns the button green.
+    func testAStoredMediaIsNoLongerReportedAsDownloading() {
+        server.configuration = fastServer
+        configureManager()
+        startMovieDownload(id: 700_064, name: "Movie V")
+
+        XCTAssertTrue(waitUntil("the movie to be stored") {
+            DownloadManager.shared.movieIsDownloaded("700064")
+        })
+        XCTAssertTrue(waitUntil("the media to leave the in flight state") {
+            !DownloadManager.shared.isDownloadingMediaWithID("700064", ofType: .movie)
+        }, "the player would keep showing it as still downloading")
+    }
+
+    /// Starting the same media again while it waits must not queue it twice.
+    func testAskingTwiceForAWaitingMediaDoesNotDuplicateIt() {
+        configureManager()
+        (700_065...700_069).forEach({ startMovieDownload(id: $0, name: "Movie \($0)") })
+        spin(for: 1)
+
+        let before = DownloadManager.shared.getAllMediaDecoded().count
+        startMovieDownload(id: 700_069, name: "Movie 700069")
+        spin(for: 0.5)
+
+        XCTAssertEqual(DownloadManager.shared.getAllMediaDecoded().count, before,
+                       "the media was added to the list a second time")
+        XCTAssertEqual(server.requests.filter({ $0.contains("/700069.mp4") }).count, 0,
+                       "a media that is waiting must not start transferring out of turn")
     }
 
     //MARK: - Damaged state files

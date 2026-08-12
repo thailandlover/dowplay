@@ -187,7 +187,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     func restorePendingDownloads() {
         guard configed else {return}
         for media in recordsInQueueOrder() {
-            if isDownloadingMediaWithID(media.mediaId, ofType: media.mediaType) {continue}
+            if hasLiveTask(media.mediaId, ofType: media.mediaType) {continue}
             _ = media.reCallRequest()
         }
     }
@@ -200,7 +200,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
             // A media the user paused waits for the user, and one that just failed waits for its
             // delay to pass, so neither takes a slot from a media that can transfer right now.
             record.retrivalStatus != URLSessionTask.State.suspended.rawValue
-                && !isDownloadingMediaWithID(record.mediaId, ofType: record.mediaType)
+                && !hasLiveTask(record.mediaId, ofType: record.mediaType)
                 && isReadyToStart(record, signature: signature)
         })
         guard let next = waiting.first else {return}
@@ -383,7 +383,11 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     }
 
     public func getDownloadProgress(ForMediaId id: String, ofMediaType type: MediaManager.MediaType)->Double?{
-        return getDownloadTask(withMediaId: id, forType: type)?.progress.fractionCompleted
+        if let task = getDownloadTask(withMediaId: id, forType: type) {
+            return task.progress.fractionCompleted
+        }
+        // Waiting its turn, or between two attempts: the record keeps the last position reached.
+        return record(for: id, ofType: type)?.progress
     }
 
 
@@ -523,16 +527,34 @@ public class DownloadManager: NSObject/*, ObservableObject */{
 
 
     //MARK: - Check Download Status Functions
-    ///is downloading regardless the status
-    public func isDownloadingMediaWithID(_ id : String, ofType type: MediaManager.MediaType)->Bool{
+    /// Whether a transfer for this media exists right now. Used by the bookkeeping, which has to
+    /// tell a media that is running from one that is only written down.
+    private func hasLiveTask(_ id : String, ofType type: MediaManager.MediaType)->Bool{
         let taskId = "\(id)_\(type.version_3_value)_\(userSignature)"
         return tasks.contains(where: {taskId == "\($0.mediaId ?? "")"})
+    }
+
+    private func record(for id : String, ofType type: MediaManager.MediaType)->DownloadedMedia?{
+        guard configed else {return nil}
+        let taskId = "\(id)_\(type.version_3_value)_\(userSignature)"
+        return FilesManager.shared.getTempData(id: taskId, user: userSignature)
+    }
+
+    ///is downloading regardless the status
+    ///
+    /// A media waiting its turn, or waiting for the delay that follows a failed transfer, has no
+    /// task behind it but is still a download in progress as far as the app is concerned.
+    public func isDownloadingMediaWithID(_ id : String, ofType type: MediaManager.MediaType)->Bool{
+        return hasLiveTask(id, ofType: type) || record(for: id, ofType: type) != nil
     }
 
     ///is downloading and is suspended
     public func isDownloadingMediaWithIDSuspended(_ id : String, ofType type: MediaManager.MediaType)->Bool{
         let taskId = "\(id)_\(type.version_3_value)_\(userSignature)"
-        return tasks.first(where: {taskId == "\($0.mediaId ?? "")"})?.state == .suspended
+        if let task = tasks.first(where: {taskId == "\($0.mediaId ?? "")"}) {
+            return task.state == .suspended
+        }
+        return record(for: id, ofType: type)?.retrivalStatus == URLSessionTask.State.suspended.rawValue
     }
 
 
@@ -549,7 +571,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     private func pendingRecords() -> [DownloadedMedia] {
         guard configed else {return []}
         return FilesManager.shared.getTempData(user: userSignature).filter({ record in
-            !self.isDownloadingMediaWithID(record.mediaId, ofType: record.mediaType)
+            !self.hasLiveTask(record.mediaId, ofType: record.mediaType)
         })
     }
 
