@@ -86,7 +86,7 @@ xcodebuild test -workspace Runner.xcworkspace -scheme Runner \
 
 # الملف الأول: `ios/Classes/Managers/DownloadManager.swift`
 
-هذا الملف اللي فيه كل الشغل. 12 بلوك، كل واحد لحاله تحت.
+هذا الملف اللي فيه كل الشغل. 16 بلوك، كل واحد لحاله تحت.
 
 ## 1-1. جلسة التحميل (`init`)
 
@@ -806,7 +806,100 @@ public func saveDownloadStatus(){
 
 **أثر على الريسبونس:** كلها خلفية. لا تضيف ولا تحذف أي مفتاح.
 
-## 1-14. مداخل للاختبار فقط
+## 1-14. سقف التحميلات المتوازية (3)
+
+</div>
+
+**قبل** — ما في أي سقف، كل طلب بيبلّش فوراً
+
+```swift
+let task = urlSession.downloadTask(with: url)
+if shouldStart{
+    task.resume()
+}
+```
+
+**بعد**
+
+```swift
+/// How many transfers run at the same time. The bandwidth is the same whatever this number is,
+/// so keeping it low only changes which media finishes first: with three at a time the user
+/// can start watching the first episode much sooner than with all of them crawling together.
+static let maxActiveDownloads = 3
+
+private var activeDownloads : Int {
+    return tasks.filter({$0.state == .running}).count
+}
+
+// in startDownload:
+guard !shouldStart || activeDownloads < DownloadManager.maxActiveDownloads else {
+    queueDownload(taskId: taskId, mediaId: "\(id)", name: mediaName,
+                  type: type, url: url, group: mediaGroup, object: object)
+    return nil
+}
+```
+
+<div dir="rtl" align="right">
+
+**ليش 3:** عرض النطاق ثابت. تشغيل 10 بالتوازي ما بيخلّي المجموع أسرع، بس بيخلّي **كل** الحلقات تخلص متأخرة بدل ما أول وحدة تجهز بسرعة. و3 أعلى من 1 فتحميل واحد متعلّق ما بيوقف الباقي.
+
+**السيناريو:** المستخدم يضغط "تحميل الموسم" (10 حلقات) → بالقديم 10 مهام بتتنافس (وiOS بيطابر منهم داخلياً على أي حال) والمستخدم بيستنى 20 دقيقة قبل ما يقدر يتفرج على أول حلقة. بالجديد 3 بينقلوا، أول حلقة جاهزة بعد ~6 دقائق، والباقي بينتظر دوره.
+
+**العنصر المنتظر:** بينحفظ كسجل على القرص بدون مهمة — نفس البنية اللي بنيناها للتحميلات المنقطعة. بيظهر بالليست فوراً، وبيمشي بالدور حسب تاريخ إنشاء سجله (فبيصمد بعد إعادة تشغيل التطبيق).
+
+**اللي بيمنع الطابور يعلق:**
+
+| الحالة | المعالجة |
+|---|---|
+| تحميل فشل | بينزل لآخر الطابور لمدة التأجيل الحالي (10 ثواني وبتتضاعف) فما بياخد خانة ويفشل بحلقة مفرغة |
+| تحميل تعلّق | مراقب التوقّف بيسحب منه الخانة ويعطيها لغيره، وهو بيرجع لآخر الدور |
+| المستخدم أوقف تحميل منتظر | بينحفظ بسجله كموقوف، وما بينترقّى لحد ما يشغّله |
+| المستخدم ألغى تحميل شغال | خانته بتنتقل فوراً للي بعده |
+
+**أثر على الريسبونس:** لا يوجد. العنصر المنتظر بيمر من نفس مسار السجلات (`asListEntry`) فبيوصل بنفس السبعة مفاتيح و`status = 0` — نفس اللي كان بيوصل تطبيقك للعناصر اللي iOS مطابرها داخلياً قبل هذا التعديل. مثبت باختبار `testWaitingDownloadKeepsTheResponseShape`.
+
+## 1-15. حماية من إنشاء مهمة على جلسة مبطَّلة
+
+</div>
+
+**بعد (جديد)**
+
+```swift
+/// An invalidated session throws when it is asked for a task, and it keeps delivering the
+/// callbacks of the transfers it cancelled, so nothing must be started on it any more.
+private var sessionIsInvalid = false
+
+public func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+    sessionIsInvalid = true
+}
+
+// in startDownload:
+guard !sessionIsInvalid, DownloadManager.shared === self else {return nil}
+```
+
+<div dir="rtl" align="right">
+
+**ليش:** مع الطابور صار إلغاء مهمة بيشغّل التالي **من داخل رسالة الـ delegate**. لو الجلسة كانت انبطلت بين اللحظتين، `URLSession` بترمي استثناء Objective-C غير قابل للالتقاط بـSwift → التطبيق بينهار.
+
+**هذا انمسك فعلياً:** أثناء تشغيل الاختبارات انهار التطبيق على المحاكي بالمسار التالي:
+
+</div>
+
+```text
+DownloadManager.startNextInQueue()
+  → DownloadedMedia.reCallRequest()
+    → DownloadManager.startDownload(...)
+      → __NSURLBackgroundSession _downloadTaskWithTaskForClass:
+        → NSGenericException: Task created in a session that has been invalidated
+```
+
+<div dir="rtl" align="right">
+
+الحارس بنقطة واحدة (`startDownload`) بيغطي كل المسارات: الطابور، الاسترجاع، إعادة المحاولة، ومراقب التوقّف.
+
+**أثر على الريسبونس:** لا يوجد.
+
+## 1-16. مداخل للاختبار فقط
 
 `sessionIdentifierOverride` و `simulateAppRelaunch` و `forgetConfiguration` و `stallCheckInterval`.
 
@@ -1208,7 +1301,7 @@ func reCallRequest()->String?{
 
 | الملف | التغيير | ليش |
 | --- | --- | --- |
-| `example/ios/RunnerTests/DownloadManagerTests.swift` | جديد — 22 اختبار | يغطّي الاختفاء، إعادة التشغيل، قتل التطبيق، الانقطاع، التجمّد، ردود الخطأ، الإيقاف، الإلغاء، تجميع المسلسلات، الهوية، شكل الريسبونس، والفهارس التالفة |
+| `example/ios/RunnerTests/DownloadManagerTests.swift` | جديد — 27 اختبار | يغطّي الاختفاء، إعادة التشغيل، قتل التطبيق، الانقطاع، التجمّد، ردود الخطأ، الإيقاف، الإلغاء، تجميع المسلسلات، الهوية، شكل الريسبونس، الفهارس التالفة، وسقف التحميلات |
 | `example/ios/RunnerTests/ResponseShapeSnapshotTests.swift` | جديد | بيطبع شكل كل ريسبونس؛ بيشتغل على النسخة القديمة والجديدة عشان المقارنة في القسم 0 |
 | `example/ios/RunnerTests/LocalHTTPServer.swift` | جديد | سيرفر HTTP داخل الاختبار: بيبطّئ، بيدعم Range، بيقطع الاتصال، وبيعلّقه |
 | `example/ios/Runner.xcodeproj/project.pbxproj` | إضافة هدف `RunnerTests` | ما كان في أي هدف اختبار بالمشروع |

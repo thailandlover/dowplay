@@ -327,6 +327,12 @@ public class FilesManager {
         return checkFileExistance(filePath: fullPath.path)
     }
 
+    /// When the download was first requested, used to serve the queue oldest first.
+    func tempDataDate(id: String, user: String)->Date?{
+        let fullPath = cache.appendingPathComponent(user).appendingPathComponent(id + ".keetmp")
+        return (try? fm.attributesOfItem(atPath: fullPath.path))?[.creationDate] as? Date
+    }
+
     func getTempData(id: String, user: String)->DownloadedMedia?{
         let fullPath = cache.appendingPathComponent(user).appendingPathComponent(id + ".keetmp")
         guard let data = try? Data(contentsOf: fullPath) else {return nil}

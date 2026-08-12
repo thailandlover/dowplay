@@ -94,6 +94,20 @@ for a second or two as a row with no data. This was seen for real while running 
 | `checkFolderExistance(dir:)` is fed `url.path` instead of `url.absoluteString`, in `saveTempData` and `forUser` | `absoluteString` is a `file://` URL, so the check never matched and the directory was recreated on every call | **Pre-existing** (harmless, fixed while nearby) |
 | Removed the `print` calls from `saveTempData` | It now runs on every download start, pause and failure | Housekeeping |
 
+### How many downloads run at once
+
+| Change | Why | Origin |
+| --- | --- | --- |
+| `maxActiveDownloads = 3`: `startDownload` only starts a transfer while fewer than three are running, and writes the record alone for the rest | Nothing capped the number of parallel transfers, in the plugin or on Android. The bandwidth is shared whatever the number is, so running everything at once only means the first media is ready later; three at a time lets the user start watching much sooner, and still keeps a spare slot if one transfer stalls | **Pre-existing** |
+| `startNextInQueue()` runs whenever a slot frees: on completion, failure, cancel and pause | The waiting media has to take the slot by itself, without the app asking again | Follows from the cap |
+| The queue is served oldest request first, using the record file's creation date | Survives a relaunch, unlike an in-memory order | Follows from the cap |
+| A media that just failed, or that the stall watchdog restarted, is pushed back for the length of the current retry delay | Otherwise a link that always fails takes a slot, fails, takes it again, and starves the media that could actually transfer | Follows from the cap |
+| `startDownload` refuses to build a task on an invalidated session, or from a manager instance that has been replaced | A cancelled transfer now starts the next one from a delegate callback. If the session was invalidated in between, `URLSession` throws an uncaught exception and the app goes down | **New safeguard** |
+
+A waiting media reaches Flutter through the same record path as any other in-flight download, so
+its payload carries the same keys and `status = 0`, exactly like the media iOS was queueing
+internally before this change.
+
 ### Making the state files survive a kill
 
 Every state file was written in place: the file is truncated first and the new content written
@@ -122,7 +136,7 @@ Nothing below ships in the plugin; it only exists so the fix can be proven and k
 
 | File | Change | Why |
 | --- | --- | --- |
-| `example/ios/RunnerTests/DownloadManagerTests.swift` | New: 22 tests driving the real `DownloadManager` | Covers the reported regression, relaunch, force quit, interrupted transfer, stalled transfer, error responses, pause, cancel, series grouping, task identity and the response shape |
+| `example/ios/RunnerTests/DownloadManagerTests.swift` | New: 27 tests driving the real `DownloadManager` | Covers the reported regression, relaunch, force quit, interrupted transfer, stalled transfer, error responses, pause, cancel, series grouping, task identity and the response shape |
 | `example/ios/RunnerTests/ResponseShapeSnapshotTests.swift` | New: prints every payload the plugin returns | Uses only API that exists before and after the fix, so the shapes can be captured from an older build of the library and compared |
 | `example/ios/RunnerTests/LocalHTTPServer.swift` | New: a small HTTP/1.1 server inside the test process | Gives the tests full control of the network: throttling, range requests (needed to verify a resumed transfer), dropping a connection mid-body, and hanging without closing |
 | `example/ios/Runner.xcodeproj/project.pbxproj` | Added the `RunnerTests` unit-test bundle hosted by `Runner`, linking `dowplay` | There was no test target in the repository at all |
@@ -172,7 +186,7 @@ seconds; the stall test alone accounts for roughly 30 of them.
 
 ## Verification performed
 
-* 23/23 tests pass on an iPhone 16 simulator (iOS 18.0).
+* 28/28 tests pass on an iPhone 16 simulator (iOS 18.0).
 * Mutation checks: restoring the pre-fix behaviour (foreground session, list replacement, no
   records) makes the suite fail with `the running download disappeared from the list`; removing the
   owner recovery in `didFinishDownloadingTo` makes the completed file never reach its user folder.
@@ -185,11 +199,9 @@ seconds; the stall test alone accounts for roughly 30 of them.
 
 ## Known issues left untouched
 
-* **No limit on concurrent downloads.** `startDownload` resumes every task immediately; the only
-  implicit limit is `httpMaximumConnectionsPerHost` (never configured, so 4 per host on iOS), and
-  queued tasks still report as running to the app. Android has no cap either: `DownloadService.kt`
-  initialises PRDownloader with database and timeouts only, so it uses the library's default pool
-  of `2 × availableProcessors` threads.
+* **Android has no limit on concurrent downloads.** `DownloadService.kt` initialises PRDownloader
+  with database and timeouts only, so it uses the library's default pool of
+  `2 × availableProcessors` threads. Only iOS is capped, at three.
 * **The list is not filtered by user.** `getAllMedia` returns every live task, so after a profile
   switch the previous profile's in-flight downloads are still listed. The records on disk are
   already per-user; only the live-task path leaks. Deliberately left for a later change.

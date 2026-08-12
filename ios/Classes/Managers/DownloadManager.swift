@@ -33,6 +33,17 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     private var receivedBytes : [Int : Int64] = [:]
     private var idleChecks : [Int : Int] = [:]
 
+    /// How many transfers run at the same time. The bandwidth is the same whatever this number is,
+    /// so keeping it low only changes which media finishes first: with three at a time the user
+    /// can start watching the first episode much sooner than with all of them crawling together.
+    static let maxActiveDownloads = 3
+    /// Media that just failed or was found stuck, and should not take a slot again right away.
+    private var deferredUntil : [String : Date] = [:]
+
+    private var activeDownloads : Int {
+        return tasks.filter({$0.state == .running}).count
+    }
+
 //    @Published var tasks: [URLSessionTask] = []
     var tasks: [URLSessionTask] = []
 
@@ -50,6 +61,10 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     /// Set by the test suite only. A process cannot rebuild a background session with an
     /// identifier it has already invalidated, so each simulated launch gets its own identifier.
     static var sessionIdentifierOverride : String?
+
+    /// An invalidated session throws when it is asked for a task, and it keeps delivering the
+    /// callbacks of the transfers it cancelled, so nothing must be started on it any more.
+    private var sessionIsInvalid = false
 
     override private init() {
         super.init()
@@ -88,10 +103,25 @@ public class DownloadManager: NSObject/*, ObservableObject */{
                               object: [String:Any]? = nil,
                               shouldStart : Bool = true)->URLSessionDownloadTask?  {
         if !configed {return nil}
+        guard !sessionIsInvalid, DownloadManager.shared === self else {return nil}
         let taskId = "\(id)_\(type.version_3_value)_\(userSignature)" //mediaID format (3255_movie_12_34) or (36970_series_12_34)
 
         // Match on the media id too: the same media can come back with a freshly signed URL.
         if tasks.contains(where: {$0.mediaId == taskId || $0.originalRequest?.url == url}) {
+            return nil
+        }
+
+        // Keep the payload and the group reachable whenever the transfer actually starts.
+        if let object = object, let data = try? JSONSerialization.data(withJSONObject: object, options: .prettyPrinted){
+            UserDefaults.standard.set(data, forKey: taskId)
+        }
+        mediaGroup?.register()
+
+        // Only a few transfers run at a time. The rest wait as records, which is what keeps them
+        // in the list, in order, and startable as soon as a slot frees.
+        guard !shouldStart || activeDownloads < DownloadManager.maxActiveDownloads else {
+            queueDownload(taskId: taskId, mediaId: "\(id)", name: mediaName,
+                          type: type, url: url, group: mediaGroup, object: object)
             return nil
         }
 
@@ -112,11 +142,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
             task.resume()
         }
         tasks.append(task)
-
-        if let object = object, let data = try? JSONSerialization.data(withJSONObject: object, options: .prettyPrinted){
-            UserDefaults.standard.set(data, forKey: taskId)
-        }
-        mediaGroup?.register()
+        deferredUntil[taskId] = nil
         // Persist the download before anything else can go wrong: this record is what keeps the
         // media in the list (and restartable) if the app is killed or the transfer dies.
         persistRecord(for: task, url: url, status: shouldStart ? .running : .suspended)
@@ -156,13 +182,71 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     }
 
     /// Restarts every persisted download that has no live task behind it: the app was force
-    /// quit, or the transfer died while the app was closed.
+    /// quit, or the transfer died while the app was closed. Whatever does not fit in the running
+    /// slots simply stays a record and waits its turn.
     func restorePendingDownloads() {
         guard configed else {return}
-        for media in FilesManager.shared.getTempData(user: userSignature) {
+        for media in recordsInQueueOrder() {
             if isDownloadingMediaWithID(media.mediaId, ofType: media.mediaType) {continue}
             _ = media.reCallRequest()
         }
+    }
+
+    /// Starts the media that has waited the longest, as soon as a slot is free.
+    private func startNextInQueue() {
+        guard configed, activeDownloads < DownloadManager.maxActiveDownloads else {return}
+        let signature = userSignature
+        let waiting = recordsInQueueOrder().filter({ record in
+            // A media the user paused waits for the user, and one that just failed waits for its
+            // delay to pass, so neither takes a slot from a media that can transfer right now.
+            record.retrivalStatus != URLSessionTask.State.suspended.rawValue
+                && !isDownloadingMediaWithID(record.mediaId, ofType: record.mediaType)
+                && isReadyToStart(record, signature: signature)
+        })
+        guard let next = waiting.first else {return}
+        _ = next.reCallRequest()
+    }
+
+    /// The persisted downloads, oldest request first.
+    private func recordsInQueueOrder() -> [DownloadedMedia] {
+        let signature = userSignature
+        return FilesManager.shared.getTempData(user: signature).sorted(by: { first, second in
+            let firstDate = FilesManager.shared.tempDataDate(id: taskId(of: first, signature: signature), user: signature) ?? Date.distantPast
+            let secondDate = FilesManager.shared.tempDataDate(id: taskId(of: second, signature: signature), user: signature) ?? Date.distantPast
+            return firstDate < secondDate
+        })
+    }
+
+    private func taskId(of record: DownloadedMedia, signature: String) -> String {
+        return "\(record.mediaId)_\(record.mediaType.version_3_value)_\(signature)"
+    }
+
+    private func isReadyToStart(_ record: DownloadedMedia, signature: String) -> Bool {
+        guard let waitUntil = deferredUntil[taskId(of: record, signature: signature)] else {return true}
+        return Date() >= waitUntil
+    }
+
+    /// Sends a media to the back of the queue for a while, so a transfer that keeps failing or
+    /// stalling cannot hold a slot against media that can actually run.
+    private func deferFromQueue(taskId: String, by delay: TimeInterval) {
+        deferredUntil[taskId] = Date().addingTimeInterval(delay)
+    }
+
+    /// Writes the record of a media that has to wait, without creating a task for it.
+    private func queueDownload(taskId: String, mediaId: String, name: String,
+                               type: MediaManager.MediaType, url: URL,
+                               group: MediaGroup?, object: [String:Any]?) {
+        // An earlier attempt already left a record holding the progress it reached: leave it be.
+        guard FilesManager.shared.getTempData(id: taskId, user: userSignature) == nil else {return}
+
+        var media = DownloadedMedia(mediaId: mediaId, name: name, status: .running, progress: 0)
+        if type != .movie {
+            media.mediaType = .series
+            media.mediaRetrivalType = .EpisodeInfo
+        }
+        media.object = object
+        media.group = group ?? MediaGroup.get(usingEpisodeID: mediaId)
+        media.saveDownloadStatus(taskId: taskId, signature: userSignature, url: url)
     }
 
     /// A transfer died, so try again after a while: a short outage should not leave the download
@@ -179,6 +263,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
         let work = DispatchWorkItem { [weak self] in
             guard let self = self, self.configed else {return}
             self.restorePendingDownloads()
+            self.startNextInQueue()
             // Keep sweeping while something is still waiting to be picked up.
             if !FilesManager.shared.getTempData(user: self.userSignature).isEmpty {
                 self.scheduleRetry()
@@ -235,9 +320,10 @@ public class DownloadManager: NSObject/*, ObservableObject */{
             }
             DispatchQueue.main.async {
                 self.tasks.removeAll(where: {$0.taskIdentifier == identifier})
-                if let record = FilesManager.shared.getTempData(id: taskId, user: signature) {
-                    _ = record.reCallRequest()
-                }
+                // Back of the queue: a media that keeps stalling must not hold a slot against the
+                // ones that can transfer.
+                self.deferFromQueue(taskId: taskId, by: DownloadManager.firstRetryDelay)
+                self.startNextInQueue()
             }
         })
     }
@@ -375,8 +461,10 @@ public class DownloadManager: NSObject/*, ObservableObject */{
         // Clear the record first: the cancellation callback must not resurrect the download.
         clearRecord(forTaskId: id, signature: userSignature)
         UserDefaults.standard.removeObject(forKey: id)
+        deferredUntil[id] = nil
         tasks.first(where: {$0.mediaId == id})?.cancel()
         tasks.removeAll(where: {$0.mediaId == id})
+        startNextInQueue()
     }
 
     //MARK: - Pause Download Functions
@@ -397,10 +485,18 @@ public class DownloadManager: NSObject/*, ObservableObject */{
 
     func pauseDownload(forTaskID id: String){
         if !configed {return}
-        guard let task = tasks.first(where: {$0.mediaId == id}) else {return}
+        guard let task = tasks.first(where: {$0.mediaId == id}) else {
+            // Nothing live to pause: the media is waiting in the queue, so mark its record.
+            if var record = pendingRecords().first(where: {taskId(of: $0, signature: userSignature) == id}) {
+                record.retrivalStatus = URLSessionTask.State.suspended.rawValue
+                FilesManager.shared.saveTempData(id: id, data: record, user: userSignature)
+            }
+            return
+        }
         task.suspend()
         // Remember the paused state so a restart after a relaunch does not resume it.
         persistRecord(for: task, status: .suspended)
+        startNextInQueue()
     }
 
     //MARK: - Resume Download Functions
@@ -615,6 +711,7 @@ public class DownloadManager: NSObject/*, ObservableObject */{
     /// in memory and the previous transfers are gone. Used by the test suite only.
     static func simulateAppRelaunch(completion: @escaping ()->Void) {
         let previous = shared
+        previous.sessionIsInvalid = true
         previous.networkMonitor.cancel()
         previous.urlSession.invalidateAndCancel()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -703,7 +800,13 @@ extension DownloadManager: URLSessionDelegate, URLSessionDownloadDelegate {
         DispatchQueue.main.async {
             self.tasks.removeAll(where: {$0.taskIdentifier == finishedIdentifier})
             self.retryDelay = DownloadManager.firstRetryDelay
+            self.deferredUntil[d.mediaId ?? ""] = nil
+            self.startNextInQueue()
         }
+    }
+
+    public func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        sessionIsInvalid = true
     }
 
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -753,8 +856,10 @@ extension DownloadManager: URLSessionDelegate, URLSessionDownloadDelegate {
             }
             self.persistRecord(for: task, status: wasPaused ? .suspended : .running)
             if !wasPaused {
+                self.deferFromQueue(taskId: taskId, by: self.retryDelay)
                 self.scheduleRetry()
             }
+            self.startNextInQueue()
         }
     }
 

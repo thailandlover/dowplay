@@ -371,6 +371,85 @@ final class DownloadManagerTests: XCTestCase {
         XCTAssertEqual((fromRecord["object"] as? [String: Any])?["title"] as? String, "Episode 5")
     }
 
+    //MARK: - How many run at once
+
+    /// The bandwidth is shared whatever the number is, so only a few transfer at a time and the
+    /// rest wait their turn. Everything the user asked for stays in the list from the first tap.
+    func testOnlyThreeDownloadsTransferAtOnce() {
+        configureManager()
+        let requested = (700_030...700_035).map({ id -> String in
+            startMovieDownload(id: id, name: "Movie \(id)")
+            return "\(id)"
+        })
+        spin(for: 2)
+
+        XCTAssertEqual(DownloadManager.shared.tasks.filter({ $0.state == .running }).count,
+                       DownloadManager.maxActiveDownloads,
+                       "more transfers are running than the limit allows")
+        XCTAssertEqual(server.requests.count, DownloadManager.maxActiveDownloads,
+                       "the server was asked for more media than the limit allows")
+
+        for mediaId in requested {
+            XCTAssertTrue(listContains(mediaId: mediaId), "\(mediaId) is missing from the list")
+        }
+    }
+
+    /// A media that is waiting reaches Flutter exactly like a media that is transferring.
+    func testWaitingDownloadKeepsTheResponseShape() {
+        configureManager()
+        (700_036...700_039).forEach({ startMovieDownload(id: $0, name: "Movie \($0)") })
+        spin(for: 1)
+
+        guard let running = entry(forMediaId: "700036"), let waiting = entry(forMediaId: "700039") else {
+            return XCTFail("the list is missing one of the downloads")
+        }
+        XCTAssertEqual(Set(waiting.keys), Set(running.keys),
+                       "the payload changed shape: \(Set(waiting.keys).symmetricDifference(Set(running.keys)))")
+        XCTAssertEqual(waiting["status"] as? Int, 0, "a media waiting its turn is still a download in progress")
+        XCTAssertEqual((waiting["object"] as? [String: Any])?["title"] as? String, "Movie 700039")
+    }
+
+    func testWaitingDownloadStartsWhenARunningOneFinishes() {
+        server.configuration = fastServer
+        configureManager()
+        (700_040...700_043).forEach({ startMovieDownload(id: $0, name: "Movie \($0)") })
+
+        XCTAssertTrue(waitUntil("every requested movie to be stored", timeout: 60) {
+            (700_040...700_043).allSatisfy({ DownloadManager.shared.movieIsDownloaded("\($0)") })
+        })
+    }
+
+    func testCancellingARunningDownloadStartsTheNextInLine() {
+        configureManager()
+        (700_044...700_047).forEach({ startMovieDownload(id: $0, name: "Movie \($0)") })
+        spin(for: 1)
+        XCTAssertFalse(DownloadManager.shared.isDownloadingMediaWithID("700047", ofType: .movie),
+                       "the fourth media should be waiting, not running")
+
+        DownloadManager.shared.cancelMedia(withMediaId: "700044", forType: .movie)
+
+        XCTAssertTrue(waitUntil("the waiting media to take the free slot") {
+            DownloadManager.shared.isDownloadingMediaWithID("700047", ofType: .movie)
+        })
+        XCTAssertEqual(DownloadManager.shared.tasks.filter({ $0.state == .running }).count,
+                       DownloadManager.maxActiveDownloads)
+    }
+
+    func testTheLimitStillHoldsAfterARelaunch() {
+        configureManager()
+        (700_048...700_053).forEach({ startMovieDownload(id: $0, name: "Movie \($0)") })
+        spin(for: 1)
+
+        relaunchApp()
+
+        XCTAssertLessThanOrEqual(DownloadManager.shared.tasks.filter({ $0.state == .running }).count,
+                                 DownloadManager.maxActiveDownloads,
+                                 "the relaunch started more transfers than the limit allows")
+        for id in 700_048...700_053 {
+            XCTAssertTrue(listContains(mediaId: "\(id)"), "\(id) was lost across the relaunch")
+        }
+    }
+
     //MARK: - Damaged state files
 
     /// The state files used to be written in place, so a process killed halfway through left a
