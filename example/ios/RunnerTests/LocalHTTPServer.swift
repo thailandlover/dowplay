@@ -130,11 +130,13 @@ final class LocalHTTPServer {
             return
         }
 
-        let start = min(LocalHTTPServer.rangeStart(in: head) ?? 0, body.count)
-        let payload = body.subdata(in: start..<body.count)
+        let requested = LocalHTTPServer.range(in: head)
+        let start = min(requested?.start ?? 0, body.count)
+        let end = min(requested?.end ?? (body.count - 1), body.count - 1)
+        let payload = end >= start ? body.subdata(in: start..<(end + 1)) : Data()
 
-        var header = start > 0
-            ? "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes \(start)-\(body.count - 1)/\(body.count)\r\n"
+        var header = requested != nil
+            ? "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes \(start)-\(end)/\(body.count)\r\n"
             : "HTTP/1.1 200 OK\r\n"
         header += "Content-Length: \(payload.count)\r\n"
         header += "Content-Type: application/octet-stream\r\n"
@@ -191,13 +193,15 @@ final class LocalHTTPServer {
         }))
     }
 
-    private static func rangeStart(in head: String) -> Int? {
+    /// `Range: bytes=start-end`, with an open end when the client did not give one.
+    private static func range(in head: String) -> (start: Int, end: Int?)? {
         guard let line = head.split(separator: "\r\n").first(where: { $0.lowercased().hasPrefix("range:") }) else {
             return nil
         }
         guard let equals = line.firstIndex(of: "=") else { return nil }
-        let value = line[line.index(after: equals)...]
-        let bounds = value.split(separator: "-", omittingEmptySubsequences: false)
-        return bounds.first.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        let bounds = line[line.index(after: equals)...].split(separator: "-", omittingEmptySubsequences: false)
+        guard let start = bounds.first.flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) }) else { return nil }
+        let end = bounds.count > 1 ? Int(bounds[1].trimmingCharacters(in: .whitespaces)) : nil
+        return (start, end)
     }
 }

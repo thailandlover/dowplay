@@ -74,7 +74,7 @@ public class VideoPlayerViewController: UIViewController {
     @IBOutlet weak private var isLoadingIndicator : UIActivityIndicatorView!
     @IBOutlet weak private var currentTimeLabel : UILabel!
     @IBOutlet weak private var remainingTimeLabel : UILabel!
-    @IBOutlet weak private var seekTimeSlider : UISlider!
+    @IBOutlet weak internal var seekTimeSlider : UISlider!
     
     @IBOutlet weak private var btn_back : UIButton!
     @IBOutlet weak private var btn_airPlay : UIButton!
@@ -96,6 +96,8 @@ public class VideoPlayerViewController: UIViewController {
     
     
     private var sliderTouched = false
+    /// Where a seek is heading while it is still in flight, nil when the player is in charge.
+    private var seekTarget : CMTime?
     
     private var viewsShouldBeHidden : Bool = false
     private var viewsHiddenStatus : Bool = false
@@ -390,6 +392,8 @@ public class VideoPlayerViewController: UIViewController {
             //stop current playing item
             player.pause()
             player.replaceCurrentItem(with: nil)
+            // Whatever a seek on the previous item was waiting for does not apply to this one.
+            seekTarget = nil
             // load new item
             let item = AVPlayerItem(url: url)
             item.preferredForwardBufferDuration = TimeInterval(5)
@@ -564,9 +568,45 @@ public class VideoPlayerViewController: UIViewController {
     private func seekTo(value : Double){
         guard let item = self.player.currentItem else {return}
         let newValue = item.duration.seconds * value
-        
+
         let time = CMTime(seconds: newValue, preferredTimescale: item.duration.timescale)
-        self.player.seek(to: time)
+        self.seek(to: time)
+    }
+
+    /// Moves the player and keeps the slider and the labels on the position the user asked for
+    /// until the player actually reaches it.
+    ///
+    /// Handing them straight back to the periodic time observer used to make them jump: while the
+    /// seek is buffering, `currentItem.currentTime()` still reports the position the player is
+    /// leaving, so the thumb snapped back there and only reached the requested point once the data
+    /// had arrived.
+    private func seek(to time: CMTime) {
+        guard self.player != nil else {return}
+        self.seekTarget = time
+        self.showTime(time)
+        self.player.seek(to: time) { [weak self] finished in
+            // An unfinished seek means a newer one replaced it, and that one owns the UI now.
+            guard finished else {return}
+            DispatchQueue.main.async {
+                self?.seekTarget = nil
+            }
+        }
+    }
+
+    /// Paints the slider and the two labels for a given position.
+    private func showTime(_ time: CMTime) {
+        guard let item = self.player?.currentItem else {return}
+        let duration = item.duration.seconds
+        guard duration.isFinite, duration > 0, time.seconds.isFinite else {return}
+
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute, .second]
+        formatter.unitsStyle = .positional
+        formatter.zeroFormattingBehavior = .pad
+
+        self.remainingTimeLabel.text = formatter.string(from: TimeInterval(duration - time.seconds))
+        self.currentTimeLabel.text = formatter.string(from: TimeInterval(time.seconds))
+        self.seekTimeSlider.value = Float(time.seconds / duration)
     }
     
     @IBAction func backAction(_ sender : UIButton) {
@@ -580,9 +620,9 @@ public class VideoPlayerViewController: UIViewController {
     
     private func seekToSeconds(value : Double){
         guard let item = self.player.currentItem else {return}
-        
+
         let time = CMTime(seconds: value, preferredTimescale: item.duration.timescale)
-        self.player.seek(to: time)
+        self.seek(to: time)
     }
     
    
@@ -898,10 +938,15 @@ public class VideoPlayerViewController: UIViewController {
                         formatter.zeroFormattingBehavior = .pad
         let remainningTime = item.duration.seconds - item.currentTime().seconds
         guard !remainningTime.isNaN else {return}
-        if self.sliderTouched == false {
-            self.remainingTimeLabel.text = formatter.string(from: TimeInterval(remainningTime))
-            self.currentTimeLabel.text = formatter.string(from: TimeInterval(item.currentTime().seconds))
-            self.seekTimeSlider.value = Float(item.currentTime().seconds / item.duration.seconds)
+
+        // The player arrived where it was sent, so it owns the UI again even if the completion
+        // handler of the seek never came back.
+        if let target = self.seekTarget, abs(item.currentTime().seconds - target.seconds) < 1 {
+            self.seekTarget = nil
+        }
+
+        if self.sliderTouched == false && self.seekTarget == nil {
+            self.showTime(item.currentTime())
         }
         
         if remainningTime < 7 && moveToNextTime == nil && hasNext{
